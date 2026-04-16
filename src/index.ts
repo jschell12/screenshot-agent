@@ -1,31 +1,44 @@
 import { resolve } from "node:path";
-import { existsSync } from "node:fs";
+import { existsSync, mkdirSync } from "node:fs";
+import { join } from "node:path";
+import { tmpdir } from "node:os";
+import { spawn } from "node:child_process";
 import { buildPrompt } from "./prompt.js";
 import { spawnAgent } from "./spawn.js";
 import { loadConfig } from "./config.js";
 import { createTaskId, writeTask, type TaskPayload } from "./queue.js";
 import { sendTask, pollForResult } from "./remote.js";
-import { tmpdir } from "node:os";
-import { mkdirSync } from "node:fs";
-import { join } from "node:path";
-import { spawn } from "node:child_process";
+import {
+  findLatestImage,
+  resolveImageArg,
+  markProcessed,
+  listUnprocessed,
+} from "./images.js";
 
-const USAGE = `Usage: screenshot-agent <screenshot> --repo <repo> [--msg "context"] [--remote]
+const USAGE = `Usage: screenshot-agent [<screenshot>] --repo <repo> [--msg "context"] [--remote] [--list]
 
-  <screenshot>   Path to a screenshot image (.png, .jpg, .webp, .gif)
+  <screenshot>   Path to image file or directory containing images.
+                 If omitted, auto-discovers the latest unprocessed image from:
+                   1. ~/Desktop/.screenshot-agent/  (watch dir)
+                   2. ~/Downloads/.screenshot-agent/ (watch dir)
+                   3. ~/Desktop/
+                   4. ~/Downloads/
   --repo <repo>  GitHub repo (owner/name or URL) or local path
   --msg  <msg>   Optional context to guide the agent
-  --remote       Send to personal machine for processing (requires 'make setup')
+  --remote       Send to remote machine for processing (requires 'make setup')
+  --list         List all unprocessed images and exit
 
 Examples:
+  screenshot-agent --repo jschell12/my-app
+  screenshot-agent --repo jschell12/my-app --msg "fix the button alignment"
   screenshot-agent ./bug.png --repo jschell12/my-app
-  screenshot-agent ./bug.png --repo jschell12/my-app --msg "fix the button alignment"
-  screenshot-agent ./bug.png --repo jschell12/my-app --remote --msg "fix this error on login"`;
+  screenshot-agent ~/Desktop/.screenshot-agent/ --repo jschell12/my-app
+  screenshot-agent --list`;
 
 function parseArgs(argv: string[]) {
   const args = argv.slice(2);
 
-  if (args.length === 0 || args.includes("--help") || args.includes("-h")) {
+  if (args.includes("--help") || args.includes("-h")) {
     console.log(USAGE);
     process.exit(0);
   }
@@ -34,6 +47,7 @@ function parseArgs(argv: string[]) {
   let repo: string | undefined;
   let message: string | undefined;
   let remote = false;
+  let list = false;
 
   for (let i = 0; i < args.length; i++) {
     const arg = args[i];
@@ -43,25 +57,17 @@ function parseArgs(argv: string[]) {
       message = args[++i];
     } else if (arg === "--remote") {
       remote = true;
+    } else if (arg === "--list") {
+      list = true;
     } else if (!arg.startsWith("--") && !screenshot) {
       screenshot = arg;
     }
   }
 
-  if (!screenshot) {
-    console.error("Error: screenshot path is required\n");
-    console.log(USAGE);
-    process.exit(1);
-  }
-
-  if (!repo) {
-    console.error("Error: --repo is required\n");
-    console.log(USAGE);
-    process.exit(1);
-  }
-
-  return { screenshot, repo, message, remote };
+  return { screenshot, repo, message, remote, list };
 }
+
+const IMAGE_EXTS = new Set(["png", "jpg", "jpeg", "webp", "gif"]);
 
 function validateScreenshot(path: string): string {
   const abs = resolve(path);
@@ -70,11 +76,43 @@ function validateScreenshot(path: string): string {
     process.exit(1);
   }
   const ext = abs.toLowerCase().split(".").pop();
-  if (!ext || !["png", "jpg", "jpeg", "webp", "gif"].includes(ext)) {
+  if (!ext || !IMAGE_EXTS.has(ext)) {
     console.error(`Error: unsupported image format: .${ext}`);
     process.exit(1);
   }
   return abs;
+}
+
+/**
+ * Resolve the screenshot argument:
+ * - If a file path, validate and return it
+ * - If a directory, find latest unprocessed image in it
+ * - If omitted, auto-discover from Desktop/Downloads
+ */
+function resolveScreenshot(arg?: string): string {
+  if (arg) {
+    // Could be a file or directory
+    const resolved = resolveImageArg(resolve(arg));
+    if (resolved) return validateScreenshot(resolved);
+
+    // Maybe it's just a file path
+    return validateScreenshot(arg);
+  }
+
+  // Auto-discover
+  const found = findLatestImage();
+  if (!found) {
+    console.error("No unprocessed images found in:");
+    console.error("  ~/Desktop/.screenshot-agent/");
+    console.error("  ~/Downloads/.screenshot-agent/");
+    console.error("  ~/Desktop/");
+    console.error("  ~/Downloads/");
+    console.error("\nDrop an image in one of these locations, or specify a path explicitly.");
+    process.exit(1);
+  }
+
+  console.log(`Auto-discovered: ${found.path} (${found.source})`);
+  return found.path;
 }
 
 async function runLocal(
@@ -84,6 +122,7 @@ async function runLocal(
 ): Promise<void> {
   const prompt = buildPrompt({ screenshotPath, repo, message });
   const exitCode = await spawnAgent({ prompt });
+  markProcessed(screenshotPath);
   process.exit(exitCode);
 }
 
@@ -95,7 +134,6 @@ async function runRemote(
   const config = loadConfig();
   const taskId = createTaskId();
 
-  // Create task in a temp directory
   const tmpBase = join(tmpdir(), "screenshot-agent-tasks");
   mkdirSync(tmpBase, { recursive: true });
 
@@ -116,12 +154,13 @@ async function runRemote(
   const result = await pollForResult(config, taskId);
   console.log("\n---");
 
+  markProcessed(screenshotPath);
+
   if (result.status === "success") {
     console.log("Fix applied successfully!");
     if (result.pr_url) console.log(`PR: ${result.pr_url}`);
     if (result.branch) console.log(`Branch: ${result.branch}`);
 
-    // If repo is a local path, offer to pull
     if (existsSync(resolve(repo))) {
       console.log(`\nPulling latest in ${repo}...`);
       const pull = spawn("git", ["pull"], {
@@ -138,8 +177,29 @@ async function runRemote(
 }
 
 async function main() {
-  const { screenshot, repo, message, remote } = parseArgs(process.argv);
-  const screenshotPath = validateScreenshot(screenshot);
+  const { screenshot, repo, message, remote, list } = parseArgs(process.argv);
+
+  // --list mode: show unprocessed images and exit
+  if (list) {
+    const images = listUnprocessed();
+    if (images.length === 0) {
+      console.log("No unprocessed images found.");
+    } else {
+      console.log(`${images.length} unprocessed image(s):\n`);
+      for (const img of images) {
+        console.log(`  [${img.source}] ${img.path}`);
+      }
+    }
+    process.exit(0);
+  }
+
+  if (!repo) {
+    console.error("Error: --repo is required\n");
+    console.log(USAGE);
+    process.exit(1);
+  }
+
+  const screenshotPath = resolveScreenshot(screenshot);
 
   console.log(`Screenshot: ${screenshotPath}`);
   console.log(`Target repo: ${repo}`);
