@@ -6,7 +6,10 @@ PLIST_LABEL="com.screenshot-agent.daemon"
 PLIST_DEST="$HOME/Library/LaunchAgents/${PLIST_LABEL}.plist"
 PLIST_TEMPLATE="$REPO_DIR/launchd/${PLIST_LABEL}.plist"
 
-echo "=== Installing screenshot-agent (personal machine) ==="
+echo "=== Installing screenshot-agent daemon ==="
+echo ""
+echo "This machine will process screenshot tasks pushed into ~/.screenshot-agent/queue/"
+echo "by other Macs on the LAN (via scp/rsync using mac-link.sh or the /look skill)."
 echo ""
 
 # Create directories

@@ -1,12 +1,24 @@
 import { spawn } from "node:child_process";
-import {
-  type Config,
-  remoteQueueDir,
-  remoteResultsDir,
-  sshArgs,
-  sshTarget,
-} from "./config.js";
 import type { TaskResult } from "./queue.js";
+
+export interface RemoteTarget {
+  host: string;
+  user?: string;
+  queueDir?: string;
+  resultsDir?: string;
+}
+
+function sshTarget(t: RemoteTarget): string {
+  return t.user ? `${t.user}@${t.host}` : t.host;
+}
+
+function queueDir(t: RemoteTarget): string {
+  return t.queueDir ?? "~/.screenshot-agent/queue";
+}
+
+function resultsDir(t: RemoteTarget): string {
+  return t.resultsDir ?? "~/.screenshot-agent/results";
+}
 
 function exec(
   cmd: string,
@@ -22,8 +34,8 @@ function exec(
     const stdout: Buffer[] = [];
     const stderr: Buffer[] = [];
 
-    child.stdout!.on("data", (chunk) => stdout.push(chunk));
-    child.stderr!.on("data", (chunk) => stderr.push(chunk));
+    child.stdout!.on("data", (c) => stdout.push(c));
+    child.stderr!.on("data", (c) => stderr.push(c));
 
     child.on("error", reject);
     child.on("close", (code) => {
@@ -38,31 +50,19 @@ function exec(
 
 /** rsync a local task directory to the remote queue */
 export async function sendTask(
-  config: Config,
+  target: RemoteTarget,
   taskDir: string,
   taskId: string
 ): Promise<void> {
-  const target = sshTarget(config);
-  const remotePath = `${remoteQueueDir(config)}/${taskId}/`;
+  const sshT = sshTarget(target);
+  const remotePath = `${queueDir(target)}/${taskId}/`;
 
-  // Ensure remote queue dir exists
-  await exec("ssh", [
-    ...sshArgs(config),
-    target,
-    `mkdir -p ${remoteQueueDir(config)}/${taskId}`,
-  ]);
-
-  const rshFlag =
-    config.sshPort && config.sshPort !== 22
-      ? `ssh -p ${config.sshPort}`
-      : "ssh";
+  await exec("ssh", [sshT, `mkdir -p ${queueDir(target)}/${taskId}`]);
 
   const { code, stderr } = await exec("rsync", [
     "-az",
-    "--rsh",
-    rshFlag,
     `${taskDir}/`,
-    `${target}:${remotePath}`,
+    `${sshT}:${remotePath}`,
   ]);
 
   if (code !== 0) {
@@ -72,20 +72,19 @@ export async function sendTask(
 
 /** Poll the remote machine for a result file */
 export async function pollForResult(
-  config: Config,
+  target: RemoteTarget,
   taskId: string,
   opts?: { timeoutMs?: number; pollIntervalMs?: number }
 ): Promise<TaskResult> {
-  const timeoutMs = opts?.timeoutMs ?? 600_000; // 10 minutes
+  const timeoutMs = opts?.timeoutMs ?? 600_000;
   const pollMs = opts?.pollIntervalMs ?? 5_000;
-  const target = sshTarget(config);
-  const resultPath = `${remoteResultsDir(config)}/${taskId}/result.json`;
+  const sshT = sshTarget(target);
+  const resultPath = `${resultsDir(target)}/${taskId}/result.json`;
   const start = Date.now();
 
   while (Date.now() - start < timeoutMs) {
     const { stdout, code } = await exec("ssh", [
-      ...sshArgs(config),
-      target,
+      sshT,
       `cat ${resultPath} 2>/dev/null`,
     ]);
 
@@ -93,7 +92,7 @@ export async function pollForResult(
       try {
         return JSON.parse(stdout.trim());
       } catch {
-        // not valid JSON yet, keep polling
+        // keep polling
       }
     }
 
@@ -102,20 +101,41 @@ export async function pollForResult(
   }
 
   throw new Error(
-    `Timed out waiting for result after ${timeoutMs / 1000}s. Check the daemon on your personal machine.`
+    `Timed out waiting for result after ${timeoutMs / 1000}s. Is the daemon running on ${target.host}?`
   );
 }
 
 /** Test SSH connectivity */
-export async function testConnection(config: Config): Promise<boolean> {
+export async function testConnection(target: RemoteTarget): Promise<boolean> {
   try {
     const { stdout, code } = await exec(
       "ssh",
-      [...sshArgs(config), sshTarget(config), "echo ok"],
+      [sshTarget(target), "echo ok"],
       10_000
     );
     return code === 0 && stdout.trim() === "ok";
   } catch {
     return false;
   }
+}
+
+/**
+ * Invoke scripts/mac-link.sh discover to let the user pick a host interactively.
+ * Returns the hostname they chose, or null if cancelled.
+ */
+export function discoverHost(macLinkPath: string): Promise<string | null> {
+  return new Promise((resolve) => {
+    const child = spawn(macLinkPath, ["discover"], {
+      stdio: ["inherit", "pipe", "inherit"],
+    });
+
+    const out: Buffer[] = [];
+    child.stdout!.on("data", (c) => out.push(c));
+    child.on("close", (code) => {
+      if (code !== 0) return resolve(null);
+      const host = Buffer.concat(out).toString("utf-8").trim();
+      resolve(host || null);
+    });
+    child.on("error", () => resolve(null));
+  });
 }

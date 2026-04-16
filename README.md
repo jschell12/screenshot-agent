@@ -1,131 +1,108 @@
 # screenshot-agent
 
-Screenshot-driven code fixes. Give it an image, a target repo, and an optional message — a Claude Code agent analyzes the screenshot, finds the relevant code, fixes it, opens a PR, and merges it.
+Screenshot-driven code fixes. Take a screenshot, invoke `/look` or run `screenshot-agent`, and a Claude Code agent analyzes the image, finds the relevant code, fixes it, opens a PR, and merges it.
 
-## Quick start
+## Install
 
 ```bash
 git clone git@github.com:jschell12/screenshot-agent.git
 cd screenshot-agent
-pnpm install && pnpm build
-pnpm link --global
+pnpm install
+make install    # builds, links CLI, installs /look skill
+```
+
+That's it. Take a screenshot and run:
+
+```bash
+screenshot-agent --repo jschell12/my-app
 ```
 
 ## Usage
 
 ```bash
-# Fix a bug shown in a screenshot
-screenshot-agent ./bug.png --repo jschell12/my-app
+# Fix the latest unprocessed screenshot
+screenshot-agent --repo jschell12/my-app
 
-# With context about what to fix
-screenshot-agent ./error.png --repo jschell12/my-app --msg "the submit button overlaps the footer on mobile"
+# With context
+screenshot-agent --repo jschell12/my-app --msg "the submit button overlaps the footer"
 
-# Forward to a remote machine for processing
-screenshot-agent ./bug.png --repo jschell12/my-app --remote --msg "fix this login error"
+# Specific image (fuzzy name match)
+screenshot-agent --repo jschell12/my-app --img "Screenshot 2026-04-14"
+
+# Multiple images
+screenshot-agent --repo jschell12/my-app --img bug1 --img bug2 --msg "same issue on different pages"
+
+# All unprocessed screenshots
+screenshot-agent --repo jschell12/my-app --all
+
+# See what's in the store
+screenshot-agent --list
 ```
 
 ### What happens
 
-1. Agent reads the screenshot (Claude sees images natively)
+1. Agent reads the screenshot(s) (Claude sees images natively)
 2. Analyzes what's wrong, using your message for context
 3. Clones the repo, creates a branch
 4. Finds and fixes the relevant code
 5. Pushes, opens a PR, and merges it
 
-## Modes
+## Remote processing
 
-### Local (default)
-
-Processes on the current machine. Just needs `claude` and `gh` on PATH.
+Forward a task to another Mac on the LAN — useful when your work laptop can't run the agent but your personal Mac can:
 
 ```bash
-screenshot-agent ./bug.png --repo owner/repo --msg "description"
+# Interactive: Bonjour/mDNS discovers Macs advertising SSH
+screenshot-agent --repo jschell12/my-app --remote
+
+# Or specify directly
+screenshot-agent --repo jschell12/my-app --remote --host macmini.local
 ```
 
-### Remote (`--remote`)
-
-Forwards the screenshot + task to another machine over SSH. A daemon on that machine picks it up and processes it via [agent-queue](https://github.com/jschell12/agent-queue) with parallel workers and merge locking.
+The target Mac needs the daemon running:
 
 ```bash
-screenshot-agent ./bug.png --repo owner/repo --msg "description" --remote
+# On the machine that will process tasks
+make daemon-install
 ```
 
-### Drop folder (auto-sync)
+The daemon watches `~/.screenshot-agent/queue/` and dispatches tasks to an agent-queue worker pool (up to 3 parallel workers with merge locking).
 
-On machines with the watcher installed (`make i-wm`), drop an image into `~/Desktop/<remote-ip>/` or `~/Downloads/<remote-ip>/` and it auto-syncs to the remote daemon.
+## Image detection
 
-Specify repo/message with a sidecar JSON:
-```
-~/Desktop/192.168.1.100/bug.png
-~/Desktop/192.168.1.100/bug.json  →  {"repo": "owner/repo", "msg": "fix the button"}
-```
+New screenshots are **auto-detected** via macOS Spotlight (`kMDItemIsScreenCapture`) from `~/Desktop` and `~/Downloads`, and copied into `~/.screenshot-agent/`. No manual step needed — just take a screenshot and run the command.
 
-Or use subdirectories:
-```
-~/Desktop/192.168.1.100/owner/repo/bug.png
-```
+Already-processed images are tracked in `~/.screenshot-agent/.tracked`.
 
-## Setup
+Use `--scan` if you want to ingest non-screenshot images (downloaded files, etc.) as well.
 
-### Any machine (local use only)
+## mac-link.sh
+
+Bundled script for general-purpose LAN work between Macs:
 
 ```bash
-pnpm install && pnpm build && pnpm link --global
+make link                                # interactive: discover + pick action
+bash scripts/mac-link.sh tunnel          # set up local SSH port forward
+bash scripts/mac-link.sh rtunnel         # reverse tunnel
+bash scripts/mac-link.sh push            # rsync local → remote
+bash scripts/mac-link.sh pull            # rsync remote → local
+bash scripts/mac-link.sh discover        # print discovered host
 ```
 
-That's it. Run `screenshot-agent` anywhere.
+## Commands
 
-### Remote processing (two machines)
-
-```bash
-# Both machines: configure SSH to each other
-make setup
-
-# Machine that processes (personal laptop, CI box, etc.)
-make i-pm        # installs daemon via launchd
-
-# Machine that sends (work laptop, any other machine)
-make i-wm        # installs CLI, watcher, Claude/Cursor skills
-```
-
-## Daemon
-
-The daemon watches `~/.screenshot-agent/queue/` for tasks, adds them to agent-queue, and spawns up to 3 parallel Claude workers with merge locking.
-
-```bash
-make daemon-start    # start
-make daemon-stop     # stop
-make daemon-logs     # tail logs
-```
-
-Environment variables:
-- `MAX_WORKERS` — max parallel workers per project (default: 3)
-- `POLL_INTERVAL_MS` — queue check interval in ms (default: 5000)
-- `AQ_SCRIPTS` — path to agent-queue scripts directory
-
-## How it works
-
-```
-screenshot + repo + message
-        │
-        ├── local mode ────► claude agent spawns directly
-        │                      reads image → fixes code → PR → merge
-        │
-        └── remote mode ───► rsync to remote machine
-                                    │
-                              daemon adds to agent-queue
-                                    │
-                              workers claim tasks:
-                                agent-1 ──► claim → fix → agent-merge (locked) → complete
-                                agent-2 ──► claim → fix → agent-merge (locked) → complete
-                                agent-3 ──► claim → fix → agent-merge (locked) → complete
-                                    │
-                              result written ──► work machine polls ──► git pull
-```
+| Command | Purpose |
+|---|---|
+| `make install` | Build, link CLI, install `/look` skill (Claude + Cursor) |
+| `make daemon-install` | Install the queue-processing daemon (launchd) |
+| `make daemon-start/stop/logs` | Control the daemon |
+| `make daemon-uninstall` | Remove the daemon |
+| `make link` | Interactive SSH tunnel / file transfer |
 
 ## Requirements
 
+- macOS (uses `mdfind` for screenshot detection, `dns-sd` for discovery)
 - Node.js 22+
 - [Claude Code CLI](https://docs.anthropic.com/en/docs/claude-code)
 - [GitHub CLI](https://cli.github.com/) (`gh`) authenticated
-- [agent-queue](https://github.com/jschell12/agent-queue) (for daemon/remote mode)
+- [agent-queue](https://github.com/jschell12/agent-queue) — for daemon mode only

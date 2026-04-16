@@ -1,13 +1,17 @@
-import { resolve } from "node:path";
+import { resolve, dirname, join } from "node:path";
 import { existsSync, mkdirSync } from "node:fs";
-import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { spawn } from "node:child_process";
+import { fileURLToPath } from "node:url";
 import { buildPrompt } from "./prompt.js";
 import { spawnAgent } from "./spawn.js";
-import { loadConfig } from "./config.js";
 import { createTaskId, writeTask, type TaskPayload } from "./queue.js";
-import { sendTask, pollForResult } from "./remote.js";
+import {
+  sendTask,
+  pollForResult,
+  discoverHost,
+  type RemoteTarget,
+} from "./remote.js";
 import {
   findLatestImage,
   findAllUnprocessed,
@@ -15,19 +19,24 @@ import {
   autoIngestScreenshots,
   ingestFromScanDirs,
   markProcessed,
-  listUnprocessed,
   listAllImages,
 } from "./images.js";
 
-const USAGE = `Usage: screenshot-agent --repo <repo> [--img <name>]... [--all] [--msg "context"] [--remote] [--list] [--scan]
+const __dirname = dirname(fileURLToPath(import.meta.url));
+const MAC_LINK = resolve(__dirname, "..", "scripts", "mac-link.sh");
 
-  --repo <repo>  GitHub repo (owner/name or URL) or local path
-  --img  <name>  Select image(s) by name or partial match (repeatable)
-  --all          Process ALL unprocessed images (not just the latest)
-  --msg  <msg>   Optional context to guide the agent
-  --remote       Send to remote machine for processing (requires 'make setup')
-  --list         List all images in ~/.screenshot-agent/ and their status
-  --scan         Scan ~/Desktop and ~/Downloads for ALL images (not just screenshots)
+const USAGE = `Usage: screenshot-agent --repo <repo> [--img <name>]... [--all] [--msg "context"] [--remote [--host <host>] [--user <user>]] [--list] [--scan]
+
+  --repo  <repo>   GitHub repo (owner/name or URL) or local path
+  --img   <name>   Select image(s) by name or partial match (repeatable)
+  --all            Process ALL unprocessed images (not just the latest)
+  --msg   <msg>    Optional context to guide the agent
+  --remote         Send to a remote machine for processing
+  --host  <host>   Remote hostname/IP (with --remote). If omitted, runs
+                   mac-link.sh to discover Macs on the LAN
+  --user  <user>   Remote SSH user (defaults to current \$USER)
+  --list           List all images in ~/.screenshot-agent/ and their status
+  --scan           Scan ~/Desktop and ~/Downloads for ALL images (not just screenshots)
 
 Image detection:
   New screenshots are auto-detected from ~/Desktop and ~/Downloads via
@@ -40,10 +49,10 @@ Examples:
   screenshot-agent --repo jschell12/my-app                        # latest new screenshot
   screenshot-agent --repo jschell12/my-app --all                  # all new screenshots
   screenshot-agent --repo jschell12/my-app --msg "fix the btn"    # with context
-  screenshot-agent --repo jschell12/my-app --img "Screenshot 2026-04-14"  # specific image
   screenshot-agent --repo jschell12/my-app --img bug1 --img bug2  # multiple images
-  screenshot-agent --scan                                         # ingest ALL images
-  screenshot-agent --list                                         # see all images + status`;
+  screenshot-agent --repo jschell12/my-app --remote               # pick remote host on LAN
+  screenshot-agent --repo jschell12/my-app --remote --host mac.local
+  screenshot-agent --list                                         # see images + status`;
 
 function parseArgs(argv: string[]) {
   const args = argv.slice(2);
@@ -55,6 +64,8 @@ function parseArgs(argv: string[]) {
 
   let repo: string | undefined;
   let message: string | undefined;
+  let host: string | undefined;
+  let user: string | undefined;
   let remote = false;
   let list = false;
   let scan = false;
@@ -69,6 +80,10 @@ function parseArgs(argv: string[]) {
       message = args[++i];
     } else if (arg === "--img" && i + 1 < args.length) {
       imgs.push(args[++i]);
+    } else if (arg === "--host" && i + 1 < args.length) {
+      host = args[++i];
+    } else if (arg === "--user" && i + 1 < args.length) {
+      user = args[++i];
     } else if (arg === "--remote") {
       remote = true;
     } else if (arg === "--list") {
@@ -80,7 +95,7 @@ function parseArgs(argv: string[]) {
     }
   }
 
-  return { repo, message, remote, list, scan, all, imgs };
+  return { repo, message, host, user, remote, list, scan, all, imgs };
 }
 
 /** Resolve --img arguments to absolute paths in the image store */
@@ -109,14 +124,33 @@ async function runLocal(
   process.exit(exitCode);
 }
 
+async function resolveRemoteTarget(
+  host?: string,
+  user?: string
+): Promise<RemoteTarget> {
+  let resolvedHost = host;
+  if (!resolvedHost) {
+    console.log("Discovering Macs on the LAN...");
+    const discovered = await discoverHost(MAC_LINK);
+    if (!discovered) {
+      console.error("Error: no host selected. Use --host to specify one.");
+      process.exit(1);
+    }
+    resolvedHost = discovered;
+  }
+  return { host: resolvedHost, user };
+}
+
 async function runRemote(
   screenshotPaths: string[],
   repo: string,
-  message?: string
+  message: string | undefined,
+  host: string | undefined,
+  user: string | undefined
 ): Promise<void> {
-  const config = loadConfig();
+  const target = await resolveRemoteTarget(host, user);
+  console.log(`Remote: ${user ? user + "@" : ""}${target.host}`);
 
-  // Send each image as a separate task (daemon processes via agent-queue)
   const taskIds: string[] = [];
   for (const screenshotPath of screenshotPaths) {
     const taskId = createTaskId();
@@ -131,20 +165,18 @@ async function runRemote(
     };
 
     const taskDir = writeTask(tmpBase, taskId, payload, screenshotPath);
-    console.log(`Task ${taskId} created`);
-    console.log(`Sending to ${config.sshHost}...`);
+    console.log(`Sending task ${taskId}...`);
 
-    await sendTask(config, taskDir, taskId);
+    await sendTask(target, taskDir, taskId);
     taskIds.push(taskId);
     markProcessed(screenshotPath);
   }
 
   console.log(`${taskIds.length} task(s) sent. Waiting for results...`);
 
-  // Poll for all results
   let failed = false;
   for (const taskId of taskIds) {
-    const result = await pollForResult(config, taskId);
+    const result = await pollForResult(target, taskId);
     console.log(`\n--- Task ${taskId} ---`);
 
     if (result.status === "success") {
@@ -158,7 +190,6 @@ async function runRemote(
     }
   }
 
-  // Pull once at the end if repo is local
   if (existsSync(resolve(repo))) {
     console.log(`\nPulling latest in ${repo}...`);
     const pull = spawn("git", ["pull"], {
@@ -172,16 +203,15 @@ async function runRemote(
 }
 
 async function main() {
-  const { repo, message, remote, list, scan, all, imgs } = parseArgs(process.argv);
+  const { repo, message, host, user, remote, list, scan, all, imgs } =
+    parseArgs(process.argv);
 
-  // --scan: ingest ALL images from Desktop/Downloads
   if (scan) {
     const count = ingestFromScanDirs();
     console.log(`Ingested ${count} image(s) into ~/.screenshot-agent/`);
     if (!repo) process.exit(0);
   }
 
-  // --list: show all images and their status (auto-ingest screenshots first)
   if (list) {
     const ingested = autoIngestScreenshots();
     if (ingested > 0) console.log(`Auto-ingested ${ingested} new screenshot(s)\n`);
@@ -192,7 +222,9 @@ async function main() {
       console.log("Take a screenshot, or run --scan to ingest all images from Desktop/Downloads.");
     } else {
       const unprocessed = images.filter((i) => !i.isProcessed).length;
-      console.log(`${images.length} image(s) in ~/.screenshot-agent/ (${unprocessed} unprocessed):\n`);
+      console.log(
+        `${images.length} image(s) in ~/.screenshot-agent/ (${unprocessed} unprocessed):\n`
+      );
       for (const img of images) {
         const status = img.isProcessed ? "done" : "pending";
         console.log(`  [${status}] ${img.name}`);
@@ -207,14 +239,11 @@ async function main() {
     process.exit(1);
   }
 
-  // Resolve images (auto-ingest happens inside find* functions)
   let screenshotPaths: string[];
 
   if (imgs.length > 0) {
-    // Specific images requested
     screenshotPaths = resolveImages(imgs);
   } else if (all) {
-    // All unprocessed images
     const unprocessed = findAllUnprocessed();
     if (unprocessed.length === 0) {
       console.error("No unprocessed images in ~/.screenshot-agent/");
@@ -224,7 +253,6 @@ async function main() {
     screenshotPaths = unprocessed.map((img) => img.path);
     console.log(`Found ${screenshotPaths.length} unprocessed image(s)`);
   } else {
-    // Latest unprocessed
     const found = findLatestImage();
     if (!found) {
       console.error("No unprocessed images in ~/.screenshot-agent/");
@@ -242,7 +270,7 @@ async function main() {
   console.log("---");
 
   if (remote) {
-    await runRemote(screenshotPaths, repo, message);
+    await runRemote(screenshotPaths, repo, message, host, user);
   } else {
     await runLocal(screenshotPaths, repo, message);
   }
