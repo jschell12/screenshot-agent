@@ -59,9 +59,11 @@ look --repo <repo> --remote --host mac.local --msg "<message>"
 | `--msg "<text>"` | Context for the agent |
 | `--img "<name>"` | Select specific image (repeatable, fuzzy matches) |
 | `--all` | Process all unprocessed images |
-| `--remote` | Forward to another Mac (discovers via Bonjour if no --host) |
+| `--remote` | Forward to another Mac via SSH (discovers via Bonjour if no --host) |
 | `--host <host>` | Specific remote hostname (with --remote) |
 | `--user <user>` | SSH user on remote (with --remote) |
+| `--git` | Forward via age-encrypted GitHub queue repo (with --remote) |
+| `--to <host>` | Recipient hostname (with --remote --git) |
 | `--list` | Show all images and status |
 | `--scan` | Ingest ALL images from ~/Desktop |
 

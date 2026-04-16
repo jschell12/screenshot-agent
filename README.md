@@ -1,26 +1,21 @@
 # look
 
-Screenshot-driven code fixes. Take a screenshot, invoke `/look` or run `look`, and a Claude Code agent analyzes the image, finds the relevant code, fixes it, opens a PR, and merges it.
+Screenshot-driven code fixes. Take a screenshot, run `look`, and a Claude Code agent analyzes the image, finds the relevant code, fixes it, opens a PR, and merges it.
+
+Written in Go. Single static binary. age encryption for git-based remote transport.
 
 ## Install
 
 ```bash
 git clone git@github.com:jschell12/look.git
 cd look
-pnpm install
-make install    # builds, links CLI, installs /look skill
-```
-
-That's it. Take a screenshot and run:
-
-```bash
-look --repo jschell12/my-app
+make install    # builds, installs to /usr/local/bin, adds /look skill
 ```
 
 ## Usage
 
 ```bash
-# Fix the latest unprocessed screenshot
+# Fix the latest unprocessed screenshot (auto-detected from ~/Desktop)
 look --repo jschell12/my-app
 
 # With context
@@ -29,80 +24,95 @@ look --repo jschell12/my-app --msg "the submit button overlaps the footer"
 # Specific image (fuzzy name match)
 look --repo jschell12/my-app --img "Screenshot 2026-04-14"
 
-# Multiple images
-look --repo jschell12/my-app --img bug1 --img bug2 --msg "same issue on different pages"
+# Multiple images as one task
+look --repo jschell12/my-app --img bug1 --img bug2 --msg "same issue, different pages"
 
-# All unprocessed screenshots
+# Process all unprocessed screenshots
 look --repo jschell12/my-app --all
 
-# See what's in the store
+# List images + status
 look --list
 ```
 
-### What happens
-
-1. Agent reads the screenshot(s) (Claude sees images natively)
-2. Analyzes what's wrong, using your message for context
-3. Clones the repo, creates a branch
-4. Finds and fixes the relevant code
-5. Pushes, opens a PR, and merges it
-
 ## Remote processing
 
-Forward a task to another Mac on the LAN — useful when your work laptop can't run the agent but your personal Mac can:
+Forward a task to another Mac when the local machine can't run the agent.
+
+### SSH/rsync (same LAN)
 
 ```bash
-# Interactive: Bonjour/mDNS discovers Macs advertising SSH
+# Interactive: Bonjour discovers Macs advertising SSH
 look --repo jschell12/my-app --remote
 
 # Or specify directly
 look --repo jschell12/my-app --remote --host macmini.local
 ```
 
-The target Mac needs the daemon running:
+Target Mac runs the daemon: `make daemon-install`.
 
+### Encrypted git queue (works through VPN/firewall)
+
+Uses age encryption and a private GitHub repo as the transport.
+
+**One-time setup (both laptops):**
 ```bash
-# On the machine that will process tasks
-make daemon-install
+look queue-init jschell12/look-queue   # register private queue repo
+look init-keys                          # generate age keypair, publish pubkey
 ```
 
-The daemon watches `~/.look/queue/` and dispatches tasks to an agent-queue worker pool (up to 3 parallel workers with merge locking).
+**On the sender:** once the receiver has published their pubkey:
+```bash
+look add-recipient home-mbp --default   # fetches pubkey from queue repo
+```
+
+**Send:**
+```bash
+look --repo jschell12/my-app --remote --git --msg "fix this"
+```
+
+The task is age-encrypted to the receiver's pubkey, committed to the queue repo, and the receiver's daemon picks it up, processes it, and encrypts the result back.
 
 ## Image detection
 
-New screenshots are **auto-detected** via macOS Spotlight (`kMDItemIsScreenCapture`) from `~/Desktop`, and copied into `~/.look/`. No manual step needed — just take a screenshot and run the command.
+Screenshots are auto-detected from `~/Desktop` via macOS Spotlight (`kMDItemIsScreenCapture`) and copied into `~/.look/` on every run.
 
-Already-processed images are tracked in `~/.look/.tracked`.
+- `~/.look/.tracked` — processed filenames
+- `~/.look/.seen` — source paths we've ingested (prevents re-copying)
+- `--scan` — ingest ALL images (not just screenshots)
 
-Use `--scan` if you want to ingest non-screenshot images (downloaded files, etc.) as well.
+## Architecture
 
-## mac-link.sh
-
-Bundled script for general-purpose LAN work between Macs:
-
-```bash
-make link                                # interactive: discover + pick action
-bash scripts/mac-link.sh tunnel          # set up local SSH port forward
-bash scripts/mac-link.sh rtunnel         # reverse tunnel
-bash scripts/mac-link.sh push            # rsync local → remote
-bash scripts/mac-link.sh pull            # rsync remote → local
-bash scripts/mac-link.sh discover        # print discovered host
+```
+look (CLI)                      lookd (daemon)
+────────────                    ────────────
+Local mode:                     Watches ~/.look/queue/ every 5s
+  spawn claude + prompt         Enqueues tasks to agent-queue
+                                Spawns workers (up to MAX_WORKERS)
+Remote (SSH):                   Workers: claim → fix → agent-merge → complete
+  rsync task → polling
+                                Git sync (if configured):
+Remote (git):                     Pulls queue repo every N seconds
+  age-encrypt + commit + push     Decrypts new tasks addressed to us
+  poll for encrypted result       Encrypts + pushes results back
 ```
 
 ## Commands
 
 | Command | Purpose |
 |---|---|
-| `make install` | Build, link CLI, install `/look` skill (Claude + Cursor) |
-| `make daemon-install` | Install the queue-processing daemon (launchd) |
-| `make daemon-start/stop/logs` | Control the daemon |
+| `make install` | Build, install binaries, install /look skill |
+| `make daemon-install` | Install queue-processing daemon (launchd) |
+| `make daemon-start / -stop / -logs` | Control the daemon |
 | `make daemon-uninstall` | Remove the daemon |
-| `make link` | Interactive SSH tunnel / file transfer |
+| `make link` | Interactive LAN discovery (mac-link.sh) |
 
 ## Requirements
 
-- macOS (uses `mdfind` for screenshot detection, `dns-sd` for discovery)
-- Node.js 22+
+- macOS (uses `mdfind`, `dns-sd`)
+- Go 1.26+ (to build)
 - [Claude Code CLI](https://docs.anthropic.com/en/docs/claude-code)
 - [GitHub CLI](https://cli.github.com/) (`gh`) authenticated
-- [agent-queue](https://github.com/jschell12/agent-queue) — for daemon mode only
+- [agent-queue](https://github.com/jschell12/agent-queue) (for daemon)
+- `git`, `rsync`, `ssh` (stdlib on macOS)
+
+No dependency on `age` CLI — the age protocol is embedded in the binary via `filippo.io/age`.

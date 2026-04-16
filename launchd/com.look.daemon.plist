@@ -6,8 +6,7 @@
   <string>com.look.daemon</string>
   <key>ProgramArguments</key>
   <array>
-    <string>__NODE_PATH__</string>
-    <string>__DAEMON_JS__</string>
+    <string>__DAEMON_BIN__</string>
   </array>
   <key>KeepAlive</key>
   <true/>
@@ -21,6 +20,8 @@
   <dict>
     <key>PATH</key>
     <string>/usr/local/bin:/usr/bin:/bin:/opt/homebrew/bin</string>
+    <key>HOME</key>
+    <string>__HOME__</string>
   </dict>
 </dict>
 </plist>

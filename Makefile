@@ -1,16 +1,18 @@
 .PHONY: build install daemon-install daemon-uninstall daemon-start daemon-stop daemon-logs link clean
 
 DAEMON_PLIST := $(HOME)/Library/LaunchAgents/com.look.daemon.plist
+INSTALL_PREFIX ?= /usr/local
 
 build:
-	pnpm build
+	@mkdir -p bin
+	go build -o bin/look ./cmd/look
+	go build -o bin/lookd ./cmd/lookd
 
-# Install CLI + /look skill on this machine
+# Install binaries + /look skill for Claude/Cursor
 install: build
 	bash scripts/install-skill.sh
 
-# Install the queue-processing daemon (launchd). Only needed on machines
-# that should process screenshot tasks pushed from other Macs.
+# Install the queue-processing daemon (launchd)
 daemon-install: build
 	bash scripts/install-daemon.sh
 
@@ -32,4 +34,4 @@ link:
 	bash scripts/mac-link.sh
 
 clean:
-	rm -rf dist
+	rm -rf bin
