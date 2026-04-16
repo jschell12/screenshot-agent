@@ -1,44 +1,47 @@
 ---
 name: screenshot-fix
 description: >-
-  Submit a screenshot-driven code fix to a remote machine for processing.
-  Use when the user wants to fix a bug or UI issue shown in a screenshot
-  by sending it to their personal machine's agent queue.
+  Analyze a screenshot to identify a bug or UI issue, then fix the code in the
+  target repo. Optionally forward to a remote machine for processing.
 ---
 
 # Screenshot Fix
 
-Send a screenshot to your personal machine where a Claude Code agent will analyze it, fix the code, push a branch, create a PR, and merge it.
+Give this tool a screenshot (and optionally a message describing what's wrong), and it spawns a Claude Code agent to analyze the image, find the relevant code, fix it, push a branch, create a PR, and merge it.
 
 ## When to trigger
 
-- User says "fix this screenshot", "screenshot fix", "send this to my machine"
 - User provides a screenshot and mentions a repo that needs changes
+- User says "fix this screenshot", "screenshot fix", "fix this"
 - User invokes `/screenshot-fix`
+- User drops an image and describes a bug or desired change
 
 ## Steps
 
 1. Gather the required information:
    - **Screenshot path**: The image file to analyze. If the user references a screenshot on their Desktop, find it (e.g., the latest `Screenshot*.png` on `~/Desktop`). If they pasted an image, save it to `/tmp/screenshot-fix-<timestamp>.png` first.
    - **Repo**: GitHub repo (`owner/name` or URL) or local path. Ask if not provided.
-   - **Message** (optional): Additional context about what to fix.
+   - **Message** (optional): Additional context about what to fix — what's wrong, what to look for, what the expected behavior should be.
 
-2. Run the CLI:
+2. Decide the mode:
+   - **Local** (default): Process on this machine. No extra setup needed.
+   - **Remote** (`--remote`): Forward to a remote machine's daemon for processing. Requires SSH setup (`make setup`).
+
+3. Run the CLI:
 
 ```bash
-screenshot-agent <screenshot-path> --repo <repo> --remote --msg "<message>"
+# Local — process right here
+screenshot-agent <screenshot-path> --repo <repo> --msg "<message>"
+
+# Remote — forward to another machine
+screenshot-agent <screenshot-path> --repo <repo> --msg "<message>" --remote
 ```
 
-3. The tool will:
-   - Send the screenshot + task to your personal machine via SSH
-   - Wait for the agent to process it (this may take a few minutes)
-   - Report back with the PR URL and status
-   - Auto-pull if the repo is a local path
-
-4. Report the result to the user. If successful, mention the PR URL and that they can `git pull` to get the changes.
+4. Report the result to the user. If successful, mention what was fixed and that they can `git pull` to get the changes.
 
 ## Prerequisites
 
-- `screenshot-agent` must be installed (`make i-wm` from the screenshot-agent repo)
-- SSH connection to personal machine must be configured (`make setup`)
-- Daemon must be running on personal machine (`make daemon-start`)
+- `screenshot-agent` CLI on PATH (install: `pnpm build && pnpm link --global` from the screenshot-agent repo)
+- `claude` CLI on PATH
+- `gh` CLI authenticated for PR creation/merging
+- For remote mode only: SSH configured (`make setup`) + daemon running on remote machine (`make daemon-start`)

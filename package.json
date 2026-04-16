@@ -1,7 +1,7 @@
 {
   "name": "screenshot-agent",
   "version": "0.1.0",
-  "description": "CLI that takes a screenshot and spawns a Claude Code agent to fix the issue in a target repo",
+  "description": "Screenshot-driven code fixes — give it an image, repo, and optional message, and an agent fixes the code",
   "type": "module",
   "bin": {
     "screenshot-agent": "./dist/index.js",
