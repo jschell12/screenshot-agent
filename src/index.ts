@@ -21,6 +21,12 @@ import {
   markProcessed,
   listAllImages,
 } from "./images.js";
+import {
+  cmdAddRecipient,
+  cmdInitKeys,
+  cmdListRecipients,
+  cmdQueueInit,
+} from "./commands.js";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const MAC_LINK = resolve(__dirname, "..", "scripts", "mac-link.sh");
@@ -44,6 +50,12 @@ Image detection:
   No manual step needed — just take a screenshot and run the command.
 
   --scan is only needed to ingest non-screenshot images (downloads, etc).
+
+Subcommands (for encrypted git transport, coming soon — use with --git):
+  look queue-init <owner/repo>                        # register a private GitHub queue repo
+  look init-keys                                      # generate age keypair, publish pubkey
+  look add-recipient <host> [--pubkey age1...] [--default]
+  look list-recipients
 
 Examples:
   look --repo jschell12/my-app                        # latest new screenshot
@@ -202,7 +214,51 @@ async function runRemote(
   if (failed) process.exit(1);
 }
 
+async function handleSubcommand(argv: string[]): Promise<number | null> {
+  const args = argv.slice(2);
+  if (args.length === 0) return null;
+  const sub = args[0];
+
+  switch (sub) {
+    case "init-keys":
+      return cmdInitKeys();
+
+    case "queue-init": {
+      const slug = args[1];
+      if (!slug) {
+        console.error("Usage: look queue-init <owner/repo>");
+        return 1;
+      }
+      return cmdQueueInit(slug);
+    }
+
+    case "add-recipient": {
+      const hostname = args[1];
+      let pubkey: string | undefined;
+      let asDefault = false;
+      for (let i = 2; i < args.length; i++) {
+        if (args[i] === "--pubkey" && i + 1 < args.length) pubkey = args[++i];
+        else if (args[i] === "--default") asDefault = true;
+      }
+      if (!hostname) {
+        console.error("Usage: look add-recipient <hostname> [--pubkey age1...] [--default]");
+        return 1;
+      }
+      return cmdAddRecipient(hostname, { pubkey, asDefault });
+    }
+
+    case "list-recipients":
+      return cmdListRecipients();
+
+    default:
+      return null; // not a subcommand, continue with flag parsing
+  }
+}
+
 async function main() {
+  const subResult = await handleSubcommand(process.argv);
+  if (subResult !== null) process.exit(subResult);
+
   const { repo, message, host, user, remote, list, scan, all, imgs } =
     parseArgs(process.argv);
 
