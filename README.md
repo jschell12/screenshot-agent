@@ -52,17 +52,22 @@ Target Mac runs the daemon: `make daemon-install`.
 
 ### Encrypted git queue (works through VPN/firewall)
 
-Uses age encryption and a private GitHub repo as the transport.
+Uses age encryption and a private GitHub repo as the transport. Roles are explicit so it's clear which machine does what.
 
-**One-time setup (both laptops):**
+**On the receiver** (the Mac that will process tasks):
 ```bash
-xmuggle init jschell12/xmuggle-queue   # register private queue repo
+xmuggle init-recv jschell12/xmuggle-queue
+# → clones queue repo, generates age keypair, publishes pubkey, installs + starts the daemon
 ```
 
-**On the sender:** once the receiver has published their pubkey:
+**On the sender** (the Mac submitting tasks, e.g. a VPN-locked work laptop):
 ```bash
-xmuggle add-recipient home-mbp --default   # fetches pubkey from queue repo
+xmuggle init-send jschell12/xmuggle-queue --to <receiver-hostname>
+# → clones queue repo, generates age keypair, publishes pubkey,
+#   fetches receiver's pubkey and sets it as the default_recipient
 ```
+
+Omit `--to` to just set up keys/queue; `init-send` will then list the discovered recipients for you to pick from with `xmuggle add-recipient <host> --default`.
 
 **Send:**
 ```bash
