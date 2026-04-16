@@ -10,33 +10,34 @@ import { createTaskId, writeTask, type TaskPayload } from "./queue.js";
 import { sendTask, pollForResult } from "./remote.js";
 import {
   findLatestImage,
+  findImageByName,
   ingestFromScanDirs,
   markProcessed,
   listUnprocessed,
   listAllImages,
 } from "./images.js";
 
-const USAGE = `Usage: screenshot-agent --repo <repo> [--msg "context"] [--remote] [--list] [--scan]
+const USAGE = `Usage: screenshot-agent --repo <repo> [--img <name>]... [--msg "context"] [--remote] [--list] [--scan]
 
   --repo <repo>  GitHub repo (owner/name or URL) or local path
+  --img  <name>  Select image(s) by name or partial match (repeatable)
+                 If omitted, uses the latest unprocessed image
   --msg  <msg>   Optional context to guide the agent
   --remote       Send to remote machine for processing (requires 'make setup')
   --list         List all images in ~/.screenshot-agent/ and their status
   --scan         Scan ~/Desktop and ~/Downloads, move images to ~/.screenshot-agent/
 
-Image discovery:
-  Images are stored in ~/.screenshot-agent/. The latest unprocessed image
-  is automatically selected. Processed images are tracked in ~/.screenshot-agent/.tracked.
-
-  To add images, either:
-    - Run --scan to ingest from ~/Desktop and ~/Downloads
-    - Manually move/copy images into ~/.screenshot-agent/
+Image store:
+  Images live in ~/.screenshot-agent/. Processed images tracked in .tracked.
+  Use --scan to ingest from Desktop/Downloads, or copy images there manually.
 
 Examples:
-  screenshot-agent --scan                                        # ingest images from Desktop/Downloads
-  screenshot-agent --repo jschell12/my-app                       # fix latest unprocessed image
-  screenshot-agent --repo jschell12/my-app --msg "fix the btn"   # with context
-  screenshot-agent --list                                        # see all images + status`;
+  screenshot-agent --scan                                         # ingest from Desktop/Downloads
+  screenshot-agent --list                                         # see all images + status
+  screenshot-agent --repo jschell12/my-app                        # latest unprocessed image
+  screenshot-agent --repo jschell12/my-app --msg "fix the btn"    # with context
+  screenshot-agent --repo jschell12/my-app --img "Screenshot 2026-04-14"  # specific image
+  screenshot-agent --repo jschell12/my-app --img bug1.png --img bug2.png  # multiple images`;
 
 function parseArgs(argv: string[]) {
   const args = argv.slice(2);
@@ -51,6 +52,7 @@ function parseArgs(argv: string[]) {
   let remote = false;
   let list = false;
   let scan = false;
+  const imgs: string[] = [];
 
   for (let i = 0; i < args.length; i++) {
     const arg = args[i];
@@ -58,6 +60,8 @@ function parseArgs(argv: string[]) {
       repo = args[++i];
     } else if (arg === "--msg" && i + 1 < args.length) {
       message = args[++i];
+    } else if (arg === "--img" && i + 1 < args.length) {
+      imgs.push(args[++i]);
     } else if (arg === "--remote") {
       remote = true;
     } else if (arg === "--list") {
@@ -67,72 +71,99 @@ function parseArgs(argv: string[]) {
     }
   }
 
-  return { repo, message, remote, list, scan };
+  return { repo, message, remote, list, scan, imgs };
+}
+
+/** Resolve --img arguments to absolute paths in the image store */
+function resolveImages(imgs: string[]): string[] {
+  const resolved: string[] = [];
+  for (const query of imgs) {
+    const found = findImageByName(query);
+    if (!found) {
+      console.error(`Error: no image matching "${query}" in ~/.screenshot-agent/`);
+      console.error("Run --list to see available images.");
+      process.exit(1);
+    }
+    resolved.push(found.path);
+  }
+  return resolved;
 }
 
 async function runLocal(
-  screenshotPath: string,
+  screenshotPaths: string[],
   repo: string,
   message?: string
 ): Promise<void> {
-  const prompt = buildPrompt({ screenshotPath, repo, message });
+  const prompt = buildPrompt({ screenshotPaths, repo, message });
   const exitCode = await spawnAgent({ prompt });
-  markProcessed(screenshotPath);
+  for (const p of screenshotPaths) markProcessed(p);
   process.exit(exitCode);
 }
 
 async function runRemote(
-  screenshotPath: string,
+  screenshotPaths: string[],
   repo: string,
   message?: string
 ): Promise<void> {
   const config = loadConfig();
-  const taskId = createTaskId();
 
-  const tmpBase = join(tmpdir(), "screenshot-agent-tasks");
-  mkdirSync(tmpBase, { recursive: true });
+  // Send each image as a separate task (daemon processes via agent-queue)
+  const taskIds: string[] = [];
+  for (const screenshotPath of screenshotPaths) {
+    const taskId = createTaskId();
+    const tmpBase = join(tmpdir(), "screenshot-agent-tasks");
+    mkdirSync(tmpBase, { recursive: true });
 
-  const payload: TaskPayload = {
-    repo,
-    message,
-    timestamp: Date.now(),
-    status: "pending",
-  };
+    const payload: TaskPayload = {
+      repo,
+      message,
+      timestamp: Date.now(),
+      status: "pending",
+    };
 
-  const taskDir = writeTask(tmpBase, taskId, payload, screenshotPath);
-  console.log(`Task ${taskId} created`);
-  console.log(`Sending to ${config.sshHost}...`);
+    const taskDir = writeTask(tmpBase, taskId, payload, screenshotPath);
+    console.log(`Task ${taskId} created`);
+    console.log(`Sending to ${config.sshHost}...`);
 
-  await sendTask(config, taskDir, taskId);
-  console.log("Task sent. Waiting for result...");
-
-  const result = await pollForResult(config, taskId);
-  console.log("\n---");
-
-  markProcessed(screenshotPath);
-
-  if (result.status === "success") {
-    console.log("Fix applied successfully!");
-    if (result.pr_url) console.log(`PR: ${result.pr_url}`);
-    if (result.branch) console.log(`Branch: ${result.branch}`);
-
-    if (existsSync(resolve(repo))) {
-      console.log(`\nPulling latest in ${repo}...`);
-      const pull = spawn("git", ["pull"], {
-        cwd: resolve(repo),
-        stdio: "inherit",
-      });
-      await new Promise<void>((res) => pull.on("close", () => res()));
-    }
-  } else {
-    console.error("Agent reported an error:");
-    console.error(result.summary.slice(-500));
-    process.exit(1);
+    await sendTask(config, taskDir, taskId);
+    taskIds.push(taskId);
+    markProcessed(screenshotPath);
   }
+
+  console.log(`${taskIds.length} task(s) sent. Waiting for results...`);
+
+  // Poll for all results
+  let failed = false;
+  for (const taskId of taskIds) {
+    const result = await pollForResult(config, taskId);
+    console.log(`\n--- Task ${taskId} ---`);
+
+    if (result.status === "success") {
+      console.log("Fix applied successfully!");
+      if (result.pr_url) console.log(`PR: ${result.pr_url}`);
+      if (result.branch) console.log(`Branch: ${result.branch}`);
+    } else {
+      console.error("Agent reported an error:");
+      console.error(result.summary.slice(-500));
+      failed = true;
+    }
+  }
+
+  // Pull once at the end if repo is local
+  if (existsSync(resolve(repo))) {
+    console.log(`\nPulling latest in ${repo}...`);
+    const pull = spawn("git", ["pull"], {
+      cwd: resolve(repo),
+      stdio: "inherit",
+    });
+    await new Promise<void>((res) => pull.on("close", () => res()));
+  }
+
+  if (failed) process.exit(1);
 }
 
 async function main() {
-  const { repo, message, remote, list, scan } = parseArgs(process.argv);
+  const { repo, message, remote, list, scan, imgs } = parseArgs(process.argv);
 
   // --scan: ingest images from Desktop/Downloads into ~/.screenshot-agent/
   if (scan) {
@@ -164,26 +195,34 @@ async function main() {
     process.exit(1);
   }
 
-  // Find latest unprocessed image
-  const found = findLatestImage();
-  if (!found) {
-    console.error("No unprocessed images in ~/.screenshot-agent/");
-    console.error("Run: screenshot-agent --scan   to ingest from Desktop/Downloads");
-    process.exit(1);
+  // Resolve images
+  let screenshotPaths: string[];
+
+  if (imgs.length > 0) {
+    // Specific images requested
+    screenshotPaths = resolveImages(imgs);
+  } else {
+    // Auto-discover latest unprocessed
+    const found = findLatestImage();
+    if (!found) {
+      console.error("No unprocessed images in ~/.screenshot-agent/");
+      console.error("Run: screenshot-agent --scan   to ingest from Desktop/Downloads");
+      process.exit(1);
+    }
+    screenshotPaths = [found.path];
   }
 
-  const screenshotPath = found.path;
-
-  console.log(`Screenshot: ${found.name}`);
+  const names = screenshotPaths.map((p) => p.split("/").pop());
+  console.log(`Screenshot(s): ${names.join(", ")}`);
   console.log(`Target repo: ${repo}`);
   if (message) console.log(`Context: ${message}`);
   console.log(`Mode: ${remote ? "remote" : "local"}`);
   console.log("---");
 
   if (remote) {
-    await runRemote(screenshotPath, repo, message);
+    await runRemote(screenshotPaths, repo, message);
   } else {
-    await runLocal(screenshotPath, repo, message);
+    await runLocal(screenshotPaths, repo, message);
   }
 }
 

@@ -156,3 +156,47 @@ export function listAllImages(): DiscoveredImage[] {
 export function listUnprocessed(): DiscoveredImage[] {
   return listAllImages().filter((img) => !img.isProcessed);
 }
+
+/**
+ * Resolve an image by name or partial match within ~/.screenshot-agent/.
+ * Matches against filename (exact), prefix, or substring.
+ * Returns null if no match or ambiguous.
+ */
+export function findImageByName(query: string): DiscoveredImage | null {
+  ensureImageDir();
+  const tracked = loadTracked();
+  const images = listImages(IMAGE_DIR);
+
+  // Exact match first
+  for (const img of images) {
+    if (img.name === query) {
+      return { path: img.path, name: img.name, isProcessed: tracked.has(img.name) };
+    }
+  }
+
+  // Prefix match
+  const prefixMatches = images.filter((img) =>
+    img.name.toLowerCase().startsWith(query.toLowerCase())
+  );
+  if (prefixMatches.length === 1) {
+    const img = prefixMatches[0];
+    return { path: img.path, name: img.name, isProcessed: tracked.has(img.name) };
+  }
+
+  // Substring match
+  const subMatches = images.filter((img) =>
+    img.name.toLowerCase().includes(query.toLowerCase())
+  );
+  if (subMatches.length === 1) {
+    const img = subMatches[0];
+    return { path: img.path, name: img.name, isProcessed: tracked.has(img.name) };
+  }
+
+  // If multiple substring matches, return newest
+  if (subMatches.length > 1) {
+    const img = subMatches[0]; // already sorted by mtime desc
+    return { path: img.path, name: img.name, isProcessed: tracked.has(img.name) };
+  }
+
+  return null;
+}

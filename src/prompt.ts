@@ -1,5 +1,5 @@
 export interface PromptOptions {
-  screenshotPath: string;
+  screenshotPaths: string[];
   repo: string;
   message?: string;
 }
@@ -23,11 +23,16 @@ cd /tmp/screenshot-agent-${timestamp}`
     ? `\n\nAdditional context from the user: "${opts.message}"`
     : "";
 
-  return `You are a screenshot-driven code fix agent. Your job is to analyze a screenshot, understand the problem, and fix it in a target repo.
+  const screenshotInstructions =
+    opts.screenshotPaths.length === 1
+      ? `Read the file at ${opts.screenshotPaths[0]} using the Read tool. This is a screenshot showing a bug, UI issue, error, or desired change.`
+      : `Read each of the following screenshots using the Read tool. Together they show a bug, UI issue, error, or desired change:\n\n${opts.screenshotPaths.map((p, i) => `${i + 1}. ${p}`).join("\n")}`;
 
-## Step 1: Analyze the screenshot
+  return `You are a screenshot-driven code fix agent. Your job is to analyze screenshot(s), understand the problem, and fix it in a target repo.
 
-Read the file at ${opts.screenshotPath} using the Read tool. This is a screenshot showing a bug, UI issue, error, or desired change.${userContext}
+## Step 1: Analyze the screenshot(s)
+
+${screenshotInstructions}${userContext}
 
 Describe what you see and identify exactly what needs to change.
 
