@@ -41,8 +41,7 @@ Transports:
     --to <host>    recipient hostname (overrides default_recipient)
 
 Subcommands (for --git setup):
-  xmuggle queue-init <owner/repo>
-  xmuggle init-keys
+  xmuggle init <owner/repo>                  # clone queue repo, gen age keypair, publish pubkey
   xmuggle add-recipient <host> [--pubkey age1...] [--default]
   xmuggle list-recipients
 
@@ -70,11 +69,8 @@ func main() {
 	case "-h", "--help":
 		fmt.Print(usage)
 		return
-	case "queue-init":
-		cmdQueueInit(os.Args[2:])
-		return
-	case "init-keys":
-		cmdInitKeys()
+	case "init":
+		cmdInit(os.Args[2:])
 		return
 	case "add-recipient":
 		cmdAddRecipient(os.Args[2:])
@@ -329,10 +325,10 @@ func runRemoteGit(shotPaths []string, a *mainArgs) {
 		die("load config: %v", err)
 	}
 	if cfg.Git == nil {
-		die("git transport not configured. Run: xmuggle queue-init <owner/repo>")
+		die("git transport not configured. Run: xmuggle init <owner/repo>")
 	}
 	if cfg.Age == nil {
-		die("no age keypair. Run: xmuggle init-keys")
+		die("no age keypair. Run: xmuggle init <owner/repo>")
 	}
 
 	recipient := a.to
@@ -420,18 +416,8 @@ func pollForResults(taskIDs []string, poll func(string) (*queue.Result, error), 
 // Subcommands
 //
 
-func cmdQueueInit(args []string) {
-	if len(args) < 1 {
-		die("Usage: xmuggle queue-init <owner/repo>")
-	}
-	slug := args[0]
-	if !strings.Contains(slug, "/") {
-		die("Invalid slug: expected owner/repo")
-	}
-	cfg, err := config.Load()
-	if err != nil {
-		die("load config: %v", err)
-	}
+// setupQueueRepo registers the queue repo and scaffolds its directories.
+func setupQueueRepo(cfg *config.Config, slug string) {
 	cfg.SetGit(slug)
 	if err := config.Save(cfg); err != nil {
 		die("save config: %v", err)
@@ -442,7 +428,6 @@ func cmdQueueInit(args []string) {
 		die("clone: %v", err)
 	}
 
-	// Scaffold directories
 	var touched []string
 	for _, d := range []string{"queue", "results", "pubkeys", "processed"} {
 		rel := d + "/.gitkeep"
@@ -456,16 +441,52 @@ func cmdQueueInit(args []string) {
 			die("commit: %v", err)
 		}
 	}
-
 	fmt.Printf("Queue repo ready: %s\n", slug)
-	if cfg.Age != nil {
-		publishOwnPubkey(cfg)
-	} else {
-		fmt.Println("\nNext: xmuggle init-keys")
-	}
 }
 
-func cmdInitKeys() {
+// ensureKeypair generates a keypair if missing, otherwise reads the existing one.
+// Returns the public key.
+func ensureKeypair(cfg *config.Config) string {
+	identityPath := config.DefaultIdentityPath()
+	if cfg.Age != nil && cfg.Age.IdentityFile != "" {
+		identityPath = cfg.Age.IdentityFile
+	}
+
+	var pub string
+	if _, err := os.Stat(identityPath); err == nil {
+		p, err := ageutil.ReadIdentityPubkey(identityPath)
+		if err != nil {
+			die("read existing identity: %v", err)
+		}
+		pub = p
+		fmt.Printf("Identity exists at %s\n", identityPath)
+	} else {
+		fmt.Printf("Generating age keypair at %s...\n", identityPath)
+		p, err := ageutil.GenerateKeypair(identityPath)
+		if err != nil {
+			die("generate keypair: %v", err)
+		}
+		pub = p
+	}
+
+	cfg.SetAge(identityPath, pub)
+	if err := config.Save(cfg); err != nil {
+		die("save config: %v", err)
+	}
+	fmt.Printf("Public key: %s\n", pub)
+	return pub
+}
+
+// cmdInit combines queue-init and key generation. Idempotent.
+func cmdInit(args []string) {
+	if len(args) < 1 {
+		die("Usage: xmuggle init <owner/repo>")
+	}
+	slug := args[0]
+	if !strings.Contains(slug, "/") {
+		die("Invalid slug: expected owner/repo")
+	}
+
 	if err := config.EnsureDirs(); err != nil {
 		die("ensure dirs: %v", err)
 	}
@@ -474,39 +495,14 @@ func cmdInitKeys() {
 		die("load config: %v", err)
 	}
 
-	identityPath := config.DefaultIdentityPath()
-	if cfg.Age != nil && cfg.Age.IdentityFile != "" {
-		identityPath = cfg.Age.IdentityFile
-	}
-
-	if _, err := os.Stat(identityPath); err == nil {
-		pub, err := ageutil.ReadIdentityPubkey(identityPath)
-		if err != nil {
-			die("read existing identity: %v", err)
-		}
-		fmt.Printf("Identity already exists at %s\n", identityPath)
-		fmt.Printf("Public key: %s\n", pub)
-		cfg.SetAge(identityPath, pub)
-		_ = config.Save(cfg)
-		publishOwnPubkey(cfg)
-		return
-	}
-
-	fmt.Printf("Generating age keypair at %s...\n", identityPath)
-	pub, err := ageutil.GenerateKeypair(identityPath)
-	if err != nil {
-		die("generate keypair: %v", err)
-	}
-	cfg.SetAge(identityPath, pub)
-	if err := config.Save(cfg); err != nil {
-		die("save config: %v", err)
-	}
-
-	fmt.Printf("\nPublic key: %s\n", pub)
-	fmt.Println("\nShare this pubkey with other machines so they can encrypt to you:")
-	fmt.Printf("  xmuggle add-recipient %s --pubkey %s\n", cfg.Hostname, pub)
-
+	setupQueueRepo(cfg, slug)
+	ensureKeypair(cfg)
 	publishOwnPubkey(cfg)
+
+	fmt.Println()
+	fmt.Println("Done. Next:")
+	fmt.Printf("  xmuggle add-recipient <other-hostname> --default\n")
+	fmt.Printf("  xmuggle --repo <repo> --remote --git --msg \"fix this\"\n")
 }
 
 func publishOwnPubkey(cfg *config.Config) {
@@ -567,7 +563,7 @@ func cmdAddRecipient(args []string) {
 
 	if pubkey == "" {
 		if cfg.Git == nil {
-			die("no pubkey given and no queue repo. Pass --pubkey or run queue-init first.")
+			die("no pubkey given and no queue repo. Pass --pubkey or run 'xmuggle init <owner/repo>' first.")
 		}
 		if err := gitqueue.EnsureCloned(cfg.Git.QueueRepo, cfg.Git.CloneDir, cfg.Git.Branch); err != nil {
 			die("reach queue repo: %v", err)
@@ -575,7 +571,7 @@ func cmdAddRecipient(args []string) {
 		_ = gitqueue.PullRebase(cfg.Git.CloneDir, cfg.Git.Branch)
 		rel := fmt.Sprintf("pubkeys/%s.pub", hostname)
 		if !gitqueue.FileExists(cfg.Git.CloneDir, rel) {
-			die("no pubkey at %s in %s. Ask that machine's owner to run 'xmuggle init-keys'.", rel, cfg.Git.QueueRepo)
+			die("no pubkey at %s in %s. Ask that machine's owner to run 'xmuggle init <owner/repo>'.", rel, cfg.Git.QueueRepo)
 		}
 		data, err := gitqueue.ReadFile(cfg.Git.CloneDir, rel)
 		if err != nil {

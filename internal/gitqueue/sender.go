@@ -25,10 +25,10 @@ type SendArgs struct {
 // SendTask encrypts and pushes a task to the queue repo.
 func SendTask(cfg *config.Config, args SendArgs) error {
 	if cfg.Git == nil {
-		return fmt.Errorf("git transport not configured; run: xmuggle queue-init <owner/repo>")
+		return fmt.Errorf("git transport not configured; run: xmuggle init <owner/repo>")
 	}
 	if cfg.Age == nil {
-		return fmt.Errorf("no age keypair; run: xmuggle init-keys")
+		return fmt.Errorf("no age keypair; run: xmuggle init <owner/repo>")
 	}
 
 	recipientHost := args.Recipient

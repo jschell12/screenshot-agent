@@ -56,8 +56,7 @@ Uses age encryption and a private GitHub repo as the transport.
 
 **One-time setup (both laptops):**
 ```bash
-xmuggle queue-init jschell12/xmuggle-queue   # register private queue repo
-xmuggle init-keys                          # generate age keypair, publish pubkey
+xmuggle init jschell12/xmuggle-queue   # register private queue repo
 ```
 
 **On the sender:** once the receiver has published their pubkey:
