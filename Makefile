@@ -1,4 +1,4 @@
-.PHONY: build install uninstall-tool daemon-install daemon-uninstall daemon-start daemon-stop daemon-logs link clean
+.PHONY: build install install-skill uninstall-tool daemon-install daemon-uninstall daemon-start daemon-stop daemon-logs link clean
 
 DAEMON_PLIST := $(HOME)/Library/LaunchAgents/com.xmuggle.daemon.plist
 INSTALL_PREFIX ?= /usr/local
@@ -11,6 +11,20 @@ build:
 # Install binaries + /xmuggle skill for Claude/Cursor
 install: build
 	bash scripts/install-skill.sh
+
+# Install just the /xmuggle skill files (no build, no binary install).
+# Useful for updating skill text without rebuilding.
+install-skill:
+	@if [ -d $(HOME)/.claude ]; then \
+		mkdir -p $(HOME)/.claude/skills/xmuggle; \
+		cp skills/claude/SKILL.md $(HOME)/.claude/skills/xmuggle/SKILL.md; \
+		echo "  ~/.claude/skills/xmuggle/SKILL.md"; \
+	fi
+	@if [ -d $(HOME)/.cursor ]; then \
+		mkdir -p $(HOME)/.cursor/commands; \
+		cp skills/cursor/command.md $(HOME)/.cursor/commands/xmuggle.md; \
+		echo "  ~/.cursor/commands/xmuggle.md"; \
+	fi
 
 # Install the queue-processing daemon (launchd)
 daemon-install: build

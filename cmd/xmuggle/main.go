@@ -3,11 +3,13 @@
 package main
 
 import (
+	"bufio"
 	"encoding/json"
 	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"time"
 
@@ -42,8 +44,8 @@ Transports:
     --to <host>    recipient hostname (overrides default_recipient)
 
 Subcommands (for --git setup):
-  xmuggle init-recv <owner/repo>             # receiver: setup + install+start daemon
-  xmuggle init-send <owner/repo>             # sender: setup (then: add-recipient)
+  xmuggle init-recv <owner/repo> [--peer <sender>] [--json]    # receiver: setup + daemon
+  xmuggle init-send <owner/repo> [--peer <receiver>] [--json]  # sender: setup
   xmuggle peers                               # list receivers and senders in the queue repo
   xmuggle add-recipient <host> [--pubkey age1...] [--default]
   xmuggle list-recipients
@@ -507,13 +509,52 @@ func baseInit(slug string) *config.Config {
 	return cfg
 }
 
+// initArgs holds the parsed result of init-recv / init-send arguments.
+type initArgs struct {
+	slug    string
+	peer    string
+	useJSON bool
+}
+
+// parseInitArgs parses <slug> [--peer <host>] [--json]. `cmd` is used in the
+// usage error string only.
+func parseInitArgs(args []string, cmd string) initArgs {
+	var a initArgs
+	i := 0
+	for i < len(args) {
+		switch args[i] {
+		case "--peer":
+			if i+1 >= len(args) {
+				die("Usage: xmuggle %s <owner/repo> [--peer <hostname>] [--json]", cmd)
+			}
+			a.peer = args[i+1]
+			i += 2
+		case "--json":
+			a.useJSON = true
+			i++
+		default:
+			if a.slug == "" && !strings.HasPrefix(args[i], "--") {
+				a.slug = args[i]
+				i++
+			} else {
+				i++
+			}
+		}
+	}
+	if a.slug == "" {
+		die("Usage: xmuggle %s <owner/repo> [--peer <hostname>] [--json]", cmd)
+	}
+	return a
+}
+
 // cmdInitRecv sets up this machine as a receiver: base init + installs and
 // loads the launchd daemon so it starts processing incoming queue tasks.
+//
+// Optionally accepts --peer <sender-host> to cache that sender's pubkey
+// locally, and --json for non-interactive (AI-driven) use.
 func cmdInitRecv(args []string) {
-	if len(args) < 1 {
-		die("Usage: xmuggle init-recv <owner/repo>")
-	}
-	cfg := baseInit(args[0])
+	opts := parseInitArgs(args, "init-recv")
+	cfg := baseInit(opts.slug)
 	publishRoleMarker(cfg, "recv")
 
 	fmt.Println()
@@ -524,11 +565,43 @@ func cmdInitRecv(args []string) {
 		os.Exit(1)
 	}
 	fmt.Println("Daemon installed and running.")
-	fmt.Println()
-	fmt.Println("This machine will now process queue tasks addressed to it.")
-	fmt.Println("Tell senders to run:")
-	fmt.Printf("  xmuggle init-send %s\n", args[0])
-	fmt.Printf("  xmuggle add-recipient %s --default\n", mustHostname())
+
+	peers, _ := discoverPeers(cfg, "send")
+
+	if opts.useJSON {
+		emitPeersJSON(cfg, "sender", peers)
+		return
+	}
+
+	var selected string
+	switch {
+	case opts.peer != "":
+		selected = opts.peer
+	case interactive() && len(peers) > 0:
+		selected = promptSelectPeer("sender", peers)
+	default:
+		fmt.Println()
+		printDiscoveredPeers("sender", peers)
+		fmt.Println()
+		fmt.Println("This machine will now process queue tasks addressed to it.")
+		fmt.Println("Tell senders to run:")
+		fmt.Printf("  xmuggle init-send %s\n", opts.slug)
+		fmt.Printf("  xmuggle add-recipient %s --default\n", mustHostname())
+		return
+	}
+
+	if selected == "" {
+		return
+	}
+	pub, err := fetchPeerPubkey(cfg, selected)
+	if err != nil {
+		die("fetch pubkey for %s: %v", selected, err)
+	}
+	cfg.UpsertRecipient(config.Recipient{Hostname: selected, Pubkey: pub})
+	if err := config.Save(cfg); err != nil {
+		die("save config: %v", err)
+	}
+	fmt.Printf("Cached sender pubkey for: %s\n", selected)
 }
 
 // publishRoleMarker writes roles/<role>/<hostname> to the queue repo
@@ -552,31 +625,68 @@ func publishRoleMarker(cfg *config.Config, role string) {
 }
 
 // cmdInitSend sets up this machine as a sender: base init + role marker.
-// Recipient selection is a separate step (xmuggle add-recipient).
+// Optionally accepts --peer <receiver-host> to set default_recipient in one
+// shot, and --json for non-interactive (AI-driven) use.
 func cmdInitSend(args []string) {
-	if len(args) < 1 {
-		die("Usage: xmuggle init-send <owner/repo>")
-	}
-	cfg := baseInit(args[0])
+	opts := parseInitArgs(args, "init-send")
+	cfg := baseInit(opts.slug)
 	publishRoleMarker(cfg, "send")
 
-	fmt.Println()
-	fmt.Println("Discovered receivers in the queue repo:")
-	printDiscoveredRecipients(cfg)
-	fmt.Println()
-	fmt.Println("Pick one with:")
-	fmt.Println("  xmuggle add-recipient <hostname> --default")
-}
+	peers, _ := discoverPeers(cfg, "recv")
 
-// printDiscoveredRecipients lists registered receivers in the queue repo.
-func printDiscoveredRecipients(cfg *config.Config) {
-	dir := filepath.Join(cfg.Git.CloneDir, "roles", "recv")
-	entries, err := os.ReadDir(dir)
-	if err != nil {
-		fmt.Println("  (none found — the receiver needs to run 'xmuggle init-recv' first)")
+	if opts.useJSON {
+		emitPeersJSON(cfg, "receiver", peers)
 		return
 	}
-	count := 0
+
+	var selected string
+	switch {
+	case opts.peer != "":
+		selected = opts.peer
+	case interactive() && len(peers) > 0:
+		selected = promptSelectPeer("receiver", peers)
+	default:
+		fmt.Println()
+		printDiscoveredPeers("receiver", peers)
+		fmt.Println()
+		fmt.Println("Pick one with:")
+		fmt.Println("  xmuggle add-recipient <hostname> --default")
+		return
+	}
+
+	if selected == "" {
+		return
+	}
+	pub, err := fetchPeerPubkey(cfg, selected)
+	if err != nil {
+		die("fetch pubkey for %s: %v", selected, err)
+	}
+	cfg.UpsertRecipient(config.Recipient{Hostname: selected, Pubkey: pub})
+	cfg.DefaultRecipient = selected
+	if err := config.Save(cfg); err != nil {
+		die("save config: %v", err)
+	}
+	fmt.Printf("Default recipient: %s\n", selected)
+	fmt.Println()
+	fmt.Println("Ready to send. Try:")
+	fmt.Println("  xmuggle --repo <repo> --remote --git --msg \"fix this\"")
+}
+
+// discoverPeers reads roles/<role>/* from the queue repo clone and returns
+// hostnames excluding this machine's own hostname.
+func discoverPeers(cfg *config.Config, role string) ([]string, error) {
+	if cfg.Git == nil {
+		return nil, fmt.Errorf("git transport not configured")
+	}
+	dir := filepath.Join(cfg.Git.CloneDir, "roles", role)
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil, nil
+		}
+		return nil, err
+	}
+	var out []string
 	for _, e := range entries {
 		if !e.Type().IsRegular() {
 			continue
@@ -584,12 +694,118 @@ func printDiscoveredRecipients(cfg *config.Config) {
 		if strings.HasPrefix(e.Name(), ".") {
 			continue
 		}
-		fmt.Printf("  - %s\n", e.Name())
-		count++
+		if e.Name() == cfg.Hostname {
+			continue
+		}
+		out = append(out, e.Name())
 	}
-	if count == 0 {
-		fmt.Println("  (none found — the receiver needs to run 'xmuggle init-recv' first)")
+	return out, nil
+}
+
+// fetchPeerPubkey pulls the queue repo and returns pubkeys/<host>.pub.
+func fetchPeerPubkey(cfg *config.Config, host string) (string, error) {
+	if cfg.Git == nil {
+		return "", fmt.Errorf("git transport not configured")
 	}
+	if err := gitqueue.EnsureCloned(cfg.Git.QueueRepo, cfg.Git.CloneDir, cfg.Git.Branch); err != nil {
+		return "", err
+	}
+	_ = gitqueue.PullRebase(cfg.Git.CloneDir, cfg.Git.Branch)
+	rel := fmt.Sprintf("pubkeys/%s.pub", host)
+	if !gitqueue.FileExists(cfg.Git.CloneDir, rel) {
+		return "", fmt.Errorf("no pubkey at %s in %s (has that machine run 'xmuggle init-*' yet?)", rel, cfg.Git.QueueRepo)
+	}
+	data, err := gitqueue.ReadFile(cfg.Git.CloneDir, rel)
+	if err != nil {
+		return "", err
+	}
+	pub := strings.TrimSpace(string(data))
+	if !strings.HasPrefix(pub, "age1") {
+		return "", fmt.Errorf("%s contains something that is not an age pubkey", rel)
+	}
+	return pub, nil
+}
+
+// promptSelectPeer shows a numbered menu and returns the chosen hostname,
+// or "" if skipped / invalid.
+func promptSelectPeer(role string, peers []string) string {
+	labelPlural := role + "s"
+	fmt.Printf("\nRegistered %s:\n", labelPlural)
+	for i, p := range peers {
+		fmt.Printf("  [%d] %s\n", i+1, p)
+	}
+	fmt.Printf("  [0] skip\n")
+	fmt.Printf("Select one [0]: ")
+
+	reader := bufio.NewReader(os.Stdin)
+	line, err := reader.ReadString('\n')
+	if err != nil {
+		return ""
+	}
+	line = strings.TrimSpace(line)
+	if line == "" || line == "0" {
+		return ""
+	}
+	n, err := strconv.Atoi(line)
+	if err != nil || n < 1 || n > len(peers) {
+		fmt.Println("(invalid selection — skipping)")
+		return ""
+	}
+	return peers[n-1]
+}
+
+// printDiscoveredPeers lists peers informationally (no prompt).
+func printDiscoveredPeers(role string, peers []string) {
+	labelPlural := role + "s"
+	fmt.Printf("Registered %s:\n", labelPlural)
+	if len(peers) == 0 {
+		fmt.Printf("  (none found — the %s needs to run 'xmuggle init-%s' first)\n", role, shortRole(role))
+		return
+	}
+	for _, p := range peers {
+		fmt.Printf("  - %s\n", p)
+	}
+}
+
+func shortRole(role string) string {
+	switch role {
+	case "sender":
+		return "send"
+	case "receiver":
+		return "recv"
+	}
+	return role
+}
+
+// emitPeersJSON prints a machine-readable choice summary.
+func emitPeersJSON(cfg *config.Config, peerRole string, peers []string) {
+	if peers == nil {
+		peers = []string{}
+	}
+	action := "select-peer"
+	hint := fmt.Sprintf("Re-run with --peer <hostname> to proceed.")
+	if len(peers) == 0 {
+		action = "no-peers"
+		hint = fmt.Sprintf("No %ss registered yet. Base setup is complete — add a peer later with 'xmuggle add-recipient <host> --default' or re-run init with --peer once a %s has registered.", peerRole, peerRole)
+	}
+	payload := map[string]any{
+		"action":     action,
+		"role":       peerRole,
+		"peers":      peers,
+		"queue_repo": cfg.Git.QueueRepo,
+		"hint":       hint,
+	}
+	b, _ := json.MarshalIndent(payload, "", "  ")
+	fmt.Println(string(b))
+}
+
+// interactive returns true if stdin is connected to a terminal.
+func interactive() bool {
+	fi, err := os.Stdin.Stat()
+	if err != nil {
+		return false
+	}
+	return (fi.Mode() & os.ModeCharDevice) != 0
 }
 
 func mustHostname() string {
@@ -717,19 +933,11 @@ func cmdAddRecipient(args []string) {
 		if cfg.Git == nil {
 			die("no pubkey given and no queue repo. Pass --pubkey or run 'xmuggle init-send <owner/repo>' first.")
 		}
-		if err := gitqueue.EnsureCloned(cfg.Git.QueueRepo, cfg.Git.CloneDir, cfg.Git.Branch); err != nil {
-			die("reach queue repo: %v", err)
-		}
-		_ = gitqueue.PullRebase(cfg.Git.CloneDir, cfg.Git.Branch)
-		rel := fmt.Sprintf("pubkeys/%s.pub", hostname)
-		if !gitqueue.FileExists(cfg.Git.CloneDir, rel) {
-			die("no pubkey at %s in %s. Ask that machine's owner to run 'xmuggle init-recv <owner/repo>'.", rel, cfg.Git.QueueRepo)
-		}
-		data, err := gitqueue.ReadFile(cfg.Git.CloneDir, rel)
+		p, err := fetchPeerPubkey(cfg, hostname)
 		if err != nil {
-			die("read pubkey: %v", err)
+			die("%v", err)
 		}
-		pubkey = strings.TrimSpace(string(data))
+		pubkey = p
 	}
 
 	if !strings.HasPrefix(pubkey, "age1") {

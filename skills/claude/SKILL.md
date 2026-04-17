@@ -75,3 +75,49 @@ xmuggle --repo <repo> --remote --host mac.local --msg "<message>"
 - For `--remote --git`: both machines set up with roles:
   - receiver: `xmuggle init-recv <owner/repo>`  (installs + starts the daemon)
   - sender:   `xmuggle init-send <owner/repo>`  (then: `xmuggle add-recipient <receiver-host> --default`)
+
+## Pairing with a peer (AI-assisted)
+
+When a user asks you to set up xmuggle on a new machine, use the `--json` and `--peer` flags to discover and select a peer conversationally instead of relying on interactive stdin prompts.
+
+### Step 1: run init with `--json` to fetch available peers
+
+```bash
+xmuggle init-send <owner/repo> --json   # lists receivers (what to SEND to)
+# or
+xmuggle init-recv <owner/repo> --json   # lists senders (for local pubkey cache)
+```
+
+The command performs all base setup (queue clone, age keypair, role marker, daemon install for init-recv) and then emits JSON like:
+
+```json
+{
+  "action": "select-peer",
+  "role": "receiver",
+  "peers": ["joshs-macbook-pro", "work-mbp"],
+  "queue_repo": "jschell12/xmuggle-queue",
+  "hint": "Re-run with --peer <hostname> to proceed."
+}
+```
+
+If `"action": "no-peers"`, stop — the base setup is complete and no peers exist yet. Tell the user.
+
+### Step 2: ask the user conversationally
+
+Parse `.peers[]` and present them to the user. For example:
+
+> I've set up this machine. There are 2 registered receivers in your queue repo:
+> 1. joshs-macbook-pro
+> 2. work-mbp
+>
+> Which should be the default recipient for your sends?
+
+### Step 3: re-run with `--peer <choice>`
+
+```bash
+xmuggle init-send <owner/repo> --peer joshs-macbook-pro
+```
+
+This caches the peer's pubkey locally. For `init-send`, it also sets `default_recipient`. Idempotent — safe to re-run.
+
+If the user picks "none / skip", do nothing further. They can pair later with `xmuggle add-recipient <host> --default`.

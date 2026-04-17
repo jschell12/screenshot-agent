@@ -63,12 +63,19 @@ xmuggle init-recv jschell12/xmuggle-queue
 **On the sender** (the Mac submitting tasks, e.g. a VPN-locked work laptop):
 ```bash
 xmuggle init-send jschell12/xmuggle-queue
-# → clones queue repo, generates age keypair, publishes pubkey,
-#   lists registered receivers in the queue repo
-
-xmuggle add-recipient <receiver-hostname> --default
-# → fetches the receiver's pubkey from the queue repo and sets it as default_recipient
+# → clones queue repo, generates age keypair, publishes pubkey.
+#   If a receiver is already registered AND you're on a terminal, you'll be
+#   prompted to pick one as the default recipient.
 ```
+
+Or do the pairing in one shot:
+```bash
+xmuggle init-send jschell12/xmuggle-queue --peer <receiver-hostname>
+```
+
+For AI-driven setup (Claude Code / Cursor skill), use `--json` to fetch the peer list, present it to the user, then re-run with `--peer <choice>`.
+
+`init-recv` works the same way — optionally prompt/accept a peer sender to cache that sender's pubkey locally (does not change `default_recipient`).
 
 **Send:**
 ```bash
