@@ -343,3 +343,46 @@ func FindByName(query string) (*Image, error) {
 	}
 	return nil, nil
 }
+
+// Remove deletes the image file at absPath from ~/.xmuggle/. It does NOT
+// touch .seen or .tracked, so a removed image won't be re-ingested from
+// ~/Desktop (its source is still marked seen).
+func Remove(absPath string) error {
+	return os.Remove(absPath)
+}
+
+// RemoveByName fuzzy-matches and deletes a single image. Returns the
+// filename that was removed.
+func RemoveByName(query string) (string, error) {
+	img, err := FindByName(query)
+	if err != nil {
+		return "", err
+	}
+	if img == nil {
+		return "", fmt.Errorf("no image matching %q in ~/.xmuggle/", query)
+	}
+	if err := Remove(img.Path); err != nil {
+		return "", err
+	}
+	return img.Name, nil
+}
+
+// RemoveAllDone deletes every image currently marked processed (in .tracked).
+// Returns the list of removed filenames.
+func RemoveAllDone() ([]string, error) {
+	imgs, err := ListAll()
+	if err != nil {
+		return nil, err
+	}
+	var removed []string
+	for _, img := range imgs {
+		if !img.IsProcessed {
+			continue
+		}
+		if err := Remove(img.Path); err != nil {
+			continue
+		}
+		removed = append(removed, img.Name)
+	}
+	return removed, nil
+}

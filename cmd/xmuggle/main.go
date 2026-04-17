@@ -43,7 +43,8 @@ Transports:
   --remote --git   age-encrypted via private GitHub queue repo
     --to <host>    recipient hostname (overrides default_recipient)
 
-Subcommands (for --git setup):
+Subcommands:
+  xmuggle rm <name>... [--all-done]           # remove images from ~/.xmuggle/ by fuzzy name
   xmuggle init-recv <owner/repo> [--peer <sender>] [--json]    # receiver: setup + daemon
   xmuggle init-send <owner/repo> [--peer <receiver>] [--json]  # sender: setup
   xmuggle peers                               # list receivers and senders in the queue repo
@@ -82,6 +83,9 @@ func main() {
 		return
 	case "peers":
 		cmdPeers()
+		return
+	case "rm":
+		cmdRm(os.Args[2:])
 		return
 	case "add-recipient":
 		cmdAddRecipient(os.Args[2:])
@@ -953,6 +957,56 @@ func cmdAddRecipient(args []string) {
 		die("save: %v", err)
 	}
 	fmt.Printf("Added recipient %s\n", hostname)
+}
+
+// cmdRm removes images from ~/.xmuggle/ by fuzzy name match.
+// Accepts one or more <name> args, plus --all-done to delete every processed image.
+func cmdRm(args []string) {
+	if len(args) == 0 {
+		die("Usage: xmuggle rm <name>... [--all-done]")
+	}
+
+	var names []string
+	allDone := false
+	for _, a := range args {
+		if a == "--all-done" {
+			allDone = true
+			continue
+		}
+		names = append(names, a)
+	}
+
+	var failed bool
+
+	for _, q := range names {
+		name, err := images.RemoveByName(q)
+		if err != nil {
+			fmt.Fprintln(os.Stderr, "Error:", err)
+			failed = true
+			continue
+		}
+		fmt.Printf("Removed: %s\n", name)
+	}
+
+	if allDone {
+		removed, err := images.RemoveAllDone()
+		if err != nil {
+			fmt.Fprintln(os.Stderr, "Error:", err)
+			failed = true
+		}
+		if len(removed) == 0 {
+			fmt.Println("No processed images to remove.")
+		} else {
+			fmt.Printf("Removed %d processed image(s):\n", len(removed))
+			for _, n := range removed {
+				fmt.Println("  " + n)
+			}
+		}
+	}
+
+	if failed {
+		os.Exit(1)
+	}
 }
 
 func cmdListRecipients() {
