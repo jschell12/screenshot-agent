@@ -9,118 +9,155 @@ Written in Go. Single static binary. age encryption for git-based remote transpo
 ```bash
 git clone git@github.com:jschell12/xmuggle.git
 cd xmuggle
-make install    # builds, installs to /usr/local/bin, adds /xmuggle skill
+make install    # builds, installs binaries, adds /xmuggle skill
 ```
 
-## Usage
+## Quick start (local — single machine)
 
 ```bash
-# Fix the latest unprocessed screenshot (auto-detected from ~/Desktop)
-xmuggle --repo jschell12/my-app
+# Take a screenshot, then:
+xmuggle --list                                              # see what's pending
+xmuggle --repo jschell12/my-app                             # fix the latest screenshot
+xmuggle --repo jschell12/my-app --msg "button overlaps footer"   # with context
+xmuggle --repo jschell12/my-app --all                       # fix all pending screenshots
+xmuggle --repo jschell12/my-app --img bug1 --img bug2       # specific images, one task
 
-# With context
-xmuggle --repo jschell12/my-app --msg "the submit button overlaps the footer"
-
-# Specific image (fuzzy name match)
-xmuggle --repo jschell12/my-app --img "Screenshot 2026-04-14"
-
-# Multiple images as one task
-xmuggle --repo jschell12/my-app --img bug1 --img bug2 --msg "same issue, different pages"
-
-# Process all unprocessed screenshots
-xmuggle --repo jschell12/my-app --all
-
-# List images + status
-xmuggle --list
+# Screen recording (captures at 1fps, auto-submits)
+xmuggle rec --duration 30s --repo jschell12/my-app --msg "UI glitch demo"
 ```
 
-## Remote processing
+### What happens
 
-Forward a task to another Mac when the local machine can't run the agent.
+1. Agent reads the screenshot(s) — Claude sees images natively
+2. Analyzes what's wrong, using your message for context
+3. Clones the repo, creates a branch
+4. Finds and fixes the relevant code
+5. Pushes, opens a PR, and merges it
 
-### SSH/rsync (same LAN)
+## Remote setup (two machines, encrypted via GitHub)
+
+For when you can't (or don't want to) run the agent locally — e.g. a VPN-locked work laptop forwarding tasks to your personal Mac.
+
+### Step 1: Create a private queue repo (once)
 
 ```bash
-# Interactive: Bonjour discovers Macs advertising SSH
+gh repo create jschell12/xmuggle-queue --private
+```
+
+### Step 2: Set up the RECEIVING machine (personal laptop)
+
+This machine runs the daemon that processes incoming tasks.
+
+```bash
+git clone git@github.com:jschell12/xmuggle.git && cd xmuggle
+make install
+xmuggle init-recv jschell12/xmuggle-queue
+```
+
+`init-recv` does everything in one command:
+- Clones the queue repo + scaffolds directories
+- Generates an age keypair + publishes your pubkey
+- Installs + starts the daemon (launchd)
+- If senders are already registered, prompts you to cache their pubkey
+
+### Step 3: Set up the SENDING machine (work laptop)
+
+This machine submits screenshot tasks.
+
+```bash
+git clone git@github.com:jschell12/xmuggle.git && cd xmuggle
+make install
+xmuggle init-send jschell12/xmuggle-queue
+xmuggle add-recipient <receiver-hostname> --default
+```
+
+`init-send` sets up the queue repo + keypair and lists available receivers. Then `add-recipient` fetches the receiver's pubkey and sets it as the default target.
+
+### Step 4: Start sending
+
+```bash
+# Take a screenshot on the work laptop, then:
+xmuggle --repo jschell12/my-app --remote --git --msg "fix the login form"
+
+# Or record the screen and send the frames:
+xmuggle rec --duration 30s --repo jschell12/my-app --remote --git --msg "watch the sidebar"
+```
+
+The task is age-encrypted to the receiver's pubkey, committed to the queue repo. The receiver's daemon picks it up, spawns a Claude agent, fixes the code, pushes a PR, merges it, and encrypts the result back.
+
+### Step 5: Verify
+
+```bash
+xmuggle peers         # see who's registered as sender/receiver
+xmuggle list-recipients  # see configured pubkeys
+```
+
+## Remote (SSH/rsync — same LAN, no encryption)
+
+If both Macs are on the same LAN without VPN issues:
+
+```bash
+# Bonjour discovers Macs advertising SSH
 xmuggle --repo jschell12/my-app --remote
 
 # Or specify directly
 xmuggle --repo jschell12/my-app --remote --host macmini.local
 ```
 
-Target Mac runs the daemon: `make daemon-install`.
-
-### Encrypted git queue (works through VPN/firewall)
-
-Uses age encryption and a private GitHub repo as the transport. Roles are explicit so it's clear which machine does what.
-
-**On the receiver** (the Mac that will process tasks):
-```bash
-xmuggle init-recv jschell12/xmuggle-queue
-# → clones queue repo, generates age keypair, publishes pubkey, installs + starts the daemon
-```
-
-**On the sender** (the Mac submitting tasks, e.g. a VPN-locked work laptop):
-```bash
-xmuggle init-send jschell12/xmuggle-queue
-# → clones queue repo, generates age keypair, publishes pubkey.
-#   If a receiver is already registered AND you're on a terminal, you'll be
-#   prompted to pick one as the default recipient.
-```
-
-Or do the pairing in one shot:
-```bash
-xmuggle init-send jschell12/xmuggle-queue --peer <receiver-hostname>
-```
-
-For AI-driven setup (Claude Code / Cursor skill), use `--json` to fetch the peer list, present it to the user, then re-run with `--peer <choice>`.
-
-`init-recv` works the same way — optionally prompt/accept a peer sender to cache that sender's pubkey locally (does not change `default_recipient`).
-
-**Send:**
-```bash
-xmuggle --repo jschell12/my-app --remote --git --msg "fix this"
-```
-
-The task is age-encrypted to the receiver's pubkey, committed to the queue repo, and the receiver's daemon picks it up, processes it, and encrypts the result back.
+Target Mac needs the daemon: `make daemon-install` or `xmuggle init-recv <queue-repo>`.
 
 ## Image detection
 
-Screenshots are auto-detected from `~/Desktop` via macOS Spotlight (`kMDItemIsScreenCapture`) and copied into `~/.xmuggle/` on every run.
+Screenshots are auto-detected from `~/Desktop` via macOS Spotlight (`kMDItemIsScreenCapture`) and copied into `~/.xmuggle/` on every run. No manual step needed — just take a screenshot and go.
 
 - `~/.xmuggle/.tracked` — processed filenames
 - `~/.xmuggle/.seen` — source paths we've ingested (prevents re-copying)
-- `--scan` — ingest ALL images (not just screenshots)
+- `--scan` — ingest ALL images from ~/Desktop (not just screenshots)
+- `xmuggle rm <name>...` — remove images; `xmuggle rm --all-done` for bulk cleanup
+
+## Screen recording
+
+```bash
+xmuggle rec                                  # record until Ctrl+C
+xmuggle rec --duration 30s                   # fixed duration
+xmuggle rec --duration 1m --fps 2            # 2 frames/sec
+xmuggle rec --duration 30s --repo jschell12/my-app --msg "UI glitch"        # auto-submit locally
+xmuggle rec --duration 30s --repo jschell12/my-app --remote --git --msg "demo"  # auto-submit via git
+```
+
+Requires Screen Recording permission for your terminal app (System Settings > Privacy & Security > Screen Recording).
 
 ## Architecture
 
 ```
-xmuggle (CLI)                      xmuggled (daemon)
-────────────                    ────────────
-Local mode:                     Watches ~/.xmuggle/queue/ every 5s
-  spawn claude + prompt         Enqueues tasks to agent-queue
-                                Spawns workers (up to MAX_WORKERS)
-Remote (SSH):                   Workers: claim → fix → agent-merge → complete
+xmuggle (CLI)                       xmuggled (daemon)
+────────────                        ────────────
+Local mode:                         Watches ~/.xmuggle/queue/ every 5s
+  spawn claude + prompt             Enqueues tasks to agent-queue
+                                    Spawns workers (up to MAX_WORKERS)
+Remote (SSH):                       Workers: claim → fix → agent-merge → complete
   rsync task → polling
-                                Git sync (if configured):
-Remote (git):                     Pulls queue repo every N seconds
-  age-encrypt + commit + push     Decrypts new tasks addressed to us
-  poll for encrypted result       Encrypts + pushes results back
+                                    Git sync (if configured):
+Remote (git):                         Pulls queue repo every N seconds
+  age-encrypt + commit + push         Decrypts new tasks addressed to us
+  poll for encrypted result           Encrypts + pushes results back
 ```
 
-## Commands
+## Make targets
 
 | Command | Purpose |
 |---|---|
-| `make install` | Build, install binaries, install /xmuggle skill |
+| `make install` | Build, install binaries + `/xmuggle` skill |
+| `make install-skill` | Install just the skill files (no build) |
 | `make daemon-install` | Install queue-processing daemon (launchd) |
 | `make daemon-start / -stop / -logs` | Control the daemon |
 | `make daemon-uninstall` | Remove the daemon |
 | `make link` | Interactive LAN discovery (mac-link.sh) |
+| `make uninstall-tool` | Remove all xmuggle binaries, plists, skills |
 
 ## Requirements
 
-- macOS (uses `mdfind`, `dns-sd`)
+- macOS (uses `mdfind`, `dns-sd`, `screencapture`)
 - Go 1.26+ (to build)
 - [Claude Code CLI](https://docs.anthropic.com/en/docs/claude-code)
 - [GitHub CLI](https://cli.github.com/) (`gh`) authenticated

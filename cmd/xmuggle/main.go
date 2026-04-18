@@ -76,13 +76,40 @@ Image detection:
   every run. No manual step needed — just take a screenshot and go.
   Use --scan to also ingest non-screenshot images.
 
-Examples:
-  xmuggle --list                                                # what's pending
-  xmuggle --repo jschell12/my-app                               # fix latest screenshot
-  xmuggle --repo jschell12/my-app --all --msg "fix alignment"   # all pending
-  xmuggle --repo jschell12/my-app --remote --git                # encrypted via git
-  xmuggle rec --duration 30s --repo jschell12/my-app --msg "UI glitch demo"
-  xmuggle rm "Screenshot 2026-04-12"                            # clean up old images
+Quick start (local — single machine):
+  xmuggle --list                                                # see pending screenshots
+  xmuggle --repo jschell12/my-app --msg "fix the button"        # process latest screenshot
+  xmuggle --repo jschell12/my-app --all                         # process all pending
+  xmuggle rec --duration 30s --repo jschell12/my-app --msg "UI glitch"
+
+Remote setup (two machines, encrypted via GitHub):
+
+  1. Create a private queue repo (once):
+     gh repo create jschell12/xmuggle-queue --private
+
+  2. On the RECEIVING machine (personal laptop — runs the daemon):
+     git clone git@github.com:jschell12/xmuggle.git && cd xmuggle
+     make install
+     xmuggle init-recv jschell12/xmuggle-queue
+
+  3. On the SENDING machine (work laptop — submits tasks):
+     git clone git@github.com:jschell12/xmuggle.git && cd xmuggle
+     make install
+     xmuggle init-send jschell12/xmuggle-queue
+     xmuggle add-recipient <receiver-hostname> --default
+
+  4. Send screenshots from the work laptop:
+     xmuggle --repo jschell12/my-app --remote --git --msg "fix the login form"
+     xmuggle rec --duration 30s --repo jschell12/my-app --remote --git --msg "watch the sidebar"
+
+  5. Check who's registered:
+     xmuggle peers
+
+More examples:
+  xmuggle --img "Screenshot 2026-04-16" --repo jschell12/my-app  # specific image
+  xmuggle --img bug1 --img bug2 --repo jschell12/my-app          # multi-image, one task
+  xmuggle rm "Screenshot 2026-04-12"                              # remove old image
+  xmuggle rm --all-done                                           # remove all processed
 `
 
 func die(format string, a ...any) {
