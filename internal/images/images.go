@@ -279,28 +279,16 @@ func FindByName(query string) (*Image, error) {
 	return nil, nil
 }
 
-// MarkProcessed marks an image as done in the index.
+// MarkProcessed marks an image as done, deletes the file from Desktop,
+// and removes it from the tracking index.
 func MarkProcessed(absPath string) error {
+	_ = os.Remove(absPath)
+
 	idx, err := loadIndex()
 	if err != nil {
 		return err
 	}
-	entry, ok := idx.Images[absPath]
-	if !ok {
-		// Image not tracked yet — add it
-		now := time.Now()
-		entry = &ImageEntry{
-			Name:      filepath.Base(absPath),
-			Status:    "done",
-			FirstSeen: now,
-		}
-		entry.ProcessedAt = &now
-		idx.Images[absPath] = entry
-	} else {
-		now := time.Now()
-		entry.Status = "done"
-		entry.ProcessedAt = &now
-	}
+	delete(idx.Images, absPath)
 	return saveIndex(idx)
 }
 
