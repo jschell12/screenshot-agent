@@ -18,9 +18,16 @@ const BADGE_LABELS = {
 const processingSet = new Set();
 
 function showToast(msg, isError) {
-  toast.textContent = msg;
+  toast.innerHTML = '';
+  const text = document.createElement('span');
+  text.textContent = msg;
+  const closeBtn = document.createElement('button');
+  closeBtn.className = 'toast-close';
+  closeBtn.textContent = '\u00d7';
+  closeBtn.addEventListener('click', () => toast.className = 'toast hidden');
+  toast.appendChild(text);
+  toast.appendChild(closeBtn);
   toast.className = `toast ${isError ? 'toast-error' : 'toast-success'}`;
-  setTimeout(() => toast.className = 'toast hidden', 4000);
 }
 
 function render(images) {
@@ -132,6 +139,7 @@ async function sendImage(img, message) {
     processingSet.delete(img.path);
 
     if (result.status === 'success') {
+      await window.xmuggle.deleteImage(img.path);
       showToast(`Fixed: ${result.summary}`, false);
     } else if (result.status === 'no_changes') {
       showToast(result.summary, false);
