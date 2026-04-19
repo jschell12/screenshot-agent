@@ -102,10 +102,19 @@ func listDirImages(dir string) ([]Image, error) {
 		if !typ.IsRegular() && typ&os.ModeIrregular == 0 {
 			continue
 		}
-		if strings.HasPrefix(e.Name(), ".") {
-			continue
+
+		name := e.Name()
+
+		// iCloud-evicted files are renamed to ".OriginalName.icloud".
+		// Recover the real filename so the image-extension check works.
+		if strings.HasPrefix(name, ".") && strings.HasSuffix(name, ".icloud") {
+			name = strings.TrimPrefix(name, ".")
+			name = strings.TrimSuffix(name, ".icloud")
+		} else if strings.HasPrefix(name, ".") {
+			continue // normal hidden file
 		}
-		if !isImage(e.Name()) {
+
+		if !isImage(name) {
 			continue
 		}
 		fi, err := e.Info()
@@ -114,7 +123,7 @@ func listDirImages(dir string) ([]Image, error) {
 		}
 		out = append(out, Image{
 			Path:    filepath.Join(dir, e.Name()),
-			Name:    e.Name(),
+			Name:    name,
 			ModTime: fi.ModTime(),
 		})
 	}
