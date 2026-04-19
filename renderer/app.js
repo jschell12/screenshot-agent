@@ -56,7 +56,7 @@ function render(images) {
       sendBtn.title = 'Send to Claude';
       sendBtn.addEventListener('click', (e) => {
         e.stopPropagation();
-        sendImage(img);
+        promptAndSend(img);
       });
       card.appendChild(sendBtn);
     }
@@ -83,13 +83,52 @@ function render(images) {
   }
 }
 
-async function sendImage(img) {
+function promptAndSend(img) {
+  // Remove any existing modal
+  const existing = document.getElementById('context-modal');
+  if (existing) existing.remove();
+
+  const modal = document.createElement('div');
+  modal.id = 'context-modal';
+  modal.className = 'modal-overlay';
+  modal.innerHTML = `
+    <div class="modal">
+      <div class="modal-title">Send to Claude</div>
+      <div class="modal-subtitle">${img.name}</div>
+      <textarea id="context-input" placeholder="What's wrong? What should be fixed?" rows="3"></textarea>
+      <div class="modal-actions">
+        <button id="modal-cancel" class="link-btn">Cancel</button>
+        <button id="modal-send" class="modal-send-btn">Send</button>
+      </div>
+    </div>
+  `;
+  document.body.appendChild(modal);
+
+  const input = document.getElementById('context-input');
+  input.focus();
+
+  document.getElementById('modal-cancel').addEventListener('click', () => modal.remove());
+  modal.addEventListener('click', (e) => { if (e.target === modal) modal.remove(); });
+
+  const doSend = () => {
+    const message = input.value.trim();
+    modal.remove();
+    sendImage(img, message);
+  };
+
+  document.getElementById('modal-send').addEventListener('click', doSend);
+  input.addEventListener('keydown', (e) => {
+    if (e.key === 'Enter' && (e.metaKey || e.ctrlKey)) doSend();
+  });
+}
+
+async function sendImage(img, message) {
   processingSet.add(img.path);
   const images = await window.xmuggle.getImages();
   render(images);
 
   try {
-    const result = await window.xmuggle.sendToApi([img.path], '');
+    const result = await window.xmuggle.sendToApi([img.path], message || '');
     processingSet.delete(img.path);
 
     if (result.status === 'success') {
