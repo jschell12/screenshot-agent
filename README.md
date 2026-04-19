@@ -15,16 +15,20 @@ make install    # builds, installs binaries, adds /xmuggle skill
 ## Quick start (local — single machine)
 
 ```bash
-# Take a screenshot, then:
-xmuggle --list                                              # see what's pending
-xmuggle --repo jschell12/my-app                             # fix the latest screenshot
-xmuggle --repo jschell12/my-app --msg "button overlaps footer"   # with context
-xmuggle --repo jschell12/my-app --all                       # fix all pending screenshots
-xmuggle --repo jschell12/my-app --img bug1 --img bug2       # specific images, one task
+# Take a screenshot, then cd into the repo:
+cd ~/dev/my-app
+xmuggle list                                                # see what's pending
+xmuggle send                                                # fix the latest screenshot
+xmuggle send --msg "button overlaps footer"                 # with context
+xmuggle send --all                                          # fix all pending screenshots
+xmuggle send --img bug1 --img bug2                          # specific images, one task
+xmuggle send --screenshots                                  # interactive picker
 
 # Screen recording (captures at 1fps, auto-submits)
 xmuggle rec --duration 30s --repo jschell12/my-app --msg "UI glitch demo"
 ```
+
+The target repo is auto-detected from the current git directory. No `--repo` flag needed.
 
 ### What happens
 
@@ -83,17 +87,14 @@ xmuggle add-recipient <receiver-hostname> --default
 
 ```bash
 # Take a screenshot on the work laptop, then:
-xmuggle send --remote --git --msg "fix the login form"        # repo inferred from receiver
+xmuggle send --remote --git --msg "fix the login form"
 xmuggle send --remote --git --screenshots                      # pick screenshots interactively
-
-# Override repo if needed:
-xmuggle send --repo jschell12/other-app --remote --git --msg "fix something else"
 
 # Or record the screen and send the frames:
 xmuggle rec --duration 30s --remote --git --msg "watch the sidebar"
 ```
 
-`--repo` is optional when using `--remote --git` — the target repo is resolved from whatever the receiver registered during `init-recv`. If the receiver has multiple repos, you'll be prompted to pick one.
+No `--repo` needed — when you send via `--remote --git`, you select from the receiver+repo combos that were registered during `init-recv`. If there's only one, it's auto-selected. If multiple, you're prompted to pick.
 
 The task is age-encrypted to the receiver's pubkey, committed to the queue repo. The receiver's daemon picks it up, spawns a Claude agent, fixes the code, pushes a PR, merges it, and encrypts the result back.
 
@@ -109,24 +110,26 @@ xmuggle list-recipients  # see configured pubkeys
 If both Macs are on the same LAN without VPN issues:
 
 ```bash
-# Bonjour discovers Macs advertising SSH
-xmuggle --repo jschell12/my-app --remote
+# cd into the repo, then send (Bonjour discovers Macs advertising SSH)
+cd ~/dev/my-app
+xmuggle send --remote
 
-# Or specify directly
-xmuggle --repo jschell12/my-app --remote --host macmini.local
+# Or specify host directly
+xmuggle send --remote --host macmini.local
 ```
 
 Target Mac needs the daemon: `make daemon-install` or `xmuggle init-recv <queue-repo>`.
 
 ## Examples
 
-### Local (single machine)
+### Local (single machine — run from inside the repo)
 
 ```bash
-xmuggle --list                                               # see pending
-xmuggle --repo jschell12/my-app --msg "fix the button"       # latest screenshot
-xmuggle --repo jschell12/my-app --img bug1 --img bug2        # multi-image, one task
-xmuggle rec --duration 30s --repo jschell12/my-app            # screen record + submit
+xmuggle list                                                 # see pending
+cd ~/dev/my-app
+xmuggle send --msg "fix the button"                          # latest screenshot
+xmuggle send --img bug1 --img bug2                           # multi-image, one task
+xmuggle rec --duration 30s --repo jschell12/my-app           # screen record + submit
 ```
 
 ### Remote (full session — receiver + sender + send)
@@ -147,10 +150,9 @@ xmuggle init-send jschell12/xmuggle-queue
 #   Lists available receivers (with their repos) — pick one:
 xmuggle add-recipient joshs-macbook-pro --default
 
-# --- Now send from the work laptop (--repo is optional) ---
-xmuggle send --remote --git --msg "fix the login form"      # repo from receiver
+# --- Now send from the work laptop (select receiver+repo) ---
+xmuggle send --remote --git --msg "fix the login form"
 xmuggle send --all --remote --git --msg "fix all pending"
-xmuggle send --repo jschell12/other-app --remote --git       # override repo
 xmuggle rec --duration 30s --remote --git --msg "UI glitch"
 
 # --- Check status ---

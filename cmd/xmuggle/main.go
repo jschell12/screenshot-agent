@@ -30,20 +30,21 @@ import (
 const usage = `xmuggle — screenshot-driven code fixes
 
 Usage:
-  xmuggle send [--repo <repo>] [--screenshots] [--img <name>]... [--all] [--msg "context"] [transport]
+  xmuggle send [--screenshots] [--img <name>]... [--all] [--msg "context"] [transport]
   xmuggle list [--json]
   xmuggle <subcommand> [args]
 
-  xmuggle --repo <repo> [options]           (legacy — same as 'send')
-
 Send (submit screenshots for fixing):
-  send [--repo <repo>]    Target GitHub repo (owner/name, URL, or local path)
-                           Optional with --git if receiver registered a repo
+  send                     Select a receiver+repo, then send screenshots
     --screenshots          Interactive picker: choose 1+ images from a list
     --img   <name>         Select image by fuzzy match (repeatable for multi-image)
     --all                  Process ALL unprocessed images
     --msg   <msg>          Context to guide the agent (what's wrong, what to fix)
     --scan                 Ingest ALL images from ~/Desktop before selecting
+
+  Repo detection:
+    --remote --git         Receiver+repo selected from registered peers
+    local / --remote       Auto-detected from current git directory
 
   Transport (how to process):
     (default)              Run a Claude agent locally on this machine
@@ -51,8 +52,7 @@ Send (submit screenshots for fixing):
       --host <host>          Specific hostname (otherwise Bonjour discovery)
       --user <user>          SSH user (default: $USER)
     --remote --git         Forward via age-encrypted private GitHub queue repo
-      --to <host>            Recipient hostname (overrides default_recipient)
-                           --repo is optional: resolved from receiver if omitted
+      --to <host>            Override recipient (default: selected from peers)
 
 List (view available images):
   list                     Show images in ~/.xmuggle/ and their status
@@ -88,21 +88,19 @@ Image detection:
 
 Examples:
 
-  Interactive screenshot picker:
-    xmuggle send --repo jschell12/my-app --screenshots           # pick from list
-    xmuggle send --repo jschell12/my-app --screenshots --remote  # pick + send remote
-
-  Local (single machine):
+  Local (run from inside the repo):
     xmuggle list                                                 # see pending
     xmuggle list --json                                          # JSON for AI agents
-    xmuggle send --repo jschell12/my-app --msg "fix the button"  # latest screenshot
-    xmuggle send --repo jschell12/my-app --img bug1 --img bug2   # multi-image
-    xmuggle send --repo jschell12/my-app --all                   # all pending
-    xmuggle rec --duration 30s --repo jschell12/my-app            # screen record
+    cd ~/dev/my-app
+    xmuggle send --msg "fix the button"                          # latest screenshot
+    xmuggle send --screenshots                                   # pick from list
+    xmuggle send --img bug1 --img bug2                           # multi-image
+    xmuggle send --all                                           # all pending
+    xmuggle rec --duration 30s --repo jschell12/my-app           # screen record
 
-  Remote via SSH (same LAN, no encryption):
-    xmuggle send --repo jschell12/my-app --remote                # Bonjour discovery
-    xmuggle send --repo jschell12/my-app --remote --host mac.local
+  Remote via SSH (same LAN, run from inside the repo):
+    xmuggle send --remote                                        # Bonjour discovery
+    xmuggle send --remote --host mac.local
 
   Remote via git (encrypted, works through VPN):
 
@@ -120,10 +118,9 @@ Examples:
     xmuggle init-send jschell12/xmuggle-queue
     xmuggle add-recipient joshs-macbook-pro --default
 
-    # --- Send from the work laptop (--repo optional: inferred from receiver) ---
+    # --- Send from the work laptop (select receiver+repo) ---
     xmuggle send --screenshots --remote --git
     xmuggle send --remote --git --msg "fix the login form"
-    xmuggle send --repo jschell12/other-app --remote --git       # override repo
     xmuggle peers                                                # who's registered
 
   AI agent workflow (Claude Code / Cursor):
@@ -260,10 +257,23 @@ func runMain(rawArgs []string) {
 		return
 	}
 
+	// For local/SSH: auto-detect repo from cwd if not given.
 	if a.repo == "" && !a.useGit {
-		fmt.Fprintln(os.Stderr, "Error: --repo is required (or use --remote --git to infer from receiver)")
-		fmt.Println(usage)
-		os.Exit(1)
+		remote, repoPath, ok := detectGitRepo()
+		if !ok {
+			die("not in a git repo and no --repo given; cd into a repo or pass --repo")
+		}
+		if a.remote {
+			// SSH mode needs a clone-able slug
+			if remote == "" {
+				die("git repo has no remote; pass --repo")
+			}
+			a.repo = remoteToSlug(remote)
+		} else {
+			// Local mode uses the local path
+			a.repo = repoPath
+		}
+		fmt.Printf("Detected repo: %s\n", a.repo)
 	}
 
 	var shotPaths []string
@@ -418,25 +428,28 @@ func runRemoteGit(shotPaths []string, a *mainArgs) {
 	}
 
 	recipient := a.to
-	if recipient == "" {
+	repo := a.repo
+
+	if repo == "" {
+		// Select peer+repo combo — this sets both recipient and repo.
+		h, r, err := selectPeerRepo(cfg)
+		if err != nil {
+			die("%v", err)
+		}
+		if recipient == "" {
+			recipient = h
+		}
+		repo = r
+	} else if recipient == "" {
 		recipient = cfg.DefaultRecipient
 	}
 	if recipient == "" {
 		die("no recipient specified; run: xmuggle add-recipient <host> --default or pass --to <host>")
 	}
 
-	repo := a.repo
-	if repo == "" {
-		r, err := resolveReceiverRepo(cfg, recipient)
-		if err != nil {
-			die("%v", err)
-		}
-		repo = r
-		fmt.Printf("Target repo (from receiver): %s\n", repo)
-	}
-
 	fmt.Printf("Queue repo: %s\n", cfg.Git.QueueRepo)
 	fmt.Printf("Recipient: %s\n", recipient)
+	fmt.Printf("Target repo: %s\n", repo)
 
 	taskID := queue.NewTaskID()
 	fmt.Printf("Encrypting and pushing task %s (%d image(s))...\n", taskID, len(shotPaths))
@@ -849,51 +862,80 @@ func readReceiverMarker(cloneDir, hostname string) ReceiverMarker {
 	return marker
 }
 
-// resolveReceiverRepo looks up the recipient's role marker in the queue repo
-// and returns the repo slug/URL. Prompts if the receiver has multiple repos.
-func resolveReceiverRepo(cfg *config.Config, recipientHost string) (string, error) {
+// peerRepoEntry is a flattened (hostname, repo) pair for selection.
+type peerRepoEntry struct {
+	hostname string
+	repo     ReceiverRepo
+}
+
+func (e peerRepoEntry) slug() string {
+	if e.repo.Remote != "" {
+		return remoteToSlug(e.repo.Remote)
+	}
+	return e.repo.Path
+}
+
+// selectPeerRepo discovers all receivers with registered repos and prompts
+// the user to select one. Returns the recipient hostname and repo slug.
+func selectPeerRepo(cfg *config.Config) (hostname, repoSlug string, err error) {
 	if cfg.Git == nil {
-		return "", fmt.Errorf("git transport not configured")
+		return "", "", fmt.Errorf("git transport not configured")
 	}
 	if err := gitqueue.EnsureCloned(cfg.Git.QueueRepo, cfg.Git.CloneDir, cfg.Git.Branch); err != nil {
-		return "", err
+		return "", "", err
 	}
 	_ = gitqueue.PullRebase(cfg.Git.CloneDir, cfg.Git.Branch)
 
-	marker := readReceiverMarker(cfg.Git.CloneDir, recipientHost)
-	if len(marker.Repos) == 0 {
-		return "", fmt.Errorf("receiver %s has no repo configured; pass --repo", recipientHost)
+	dir := filepath.Join(cfg.Git.CloneDir, "roles", "recv")
+	entries, err2 := os.ReadDir(dir)
+	if err2 != nil {
+		return "", "", fmt.Errorf("no receivers found")
 	}
-	if len(marker.Repos) == 1 {
-		r := marker.Repos[0]
-		if r.Remote != "" {
-			return remoteToSlug(r.Remote), nil
+
+	var options []peerRepoEntry
+	for _, e := range entries {
+		if !e.Type().IsRegular() || strings.HasPrefix(e.Name(), ".") {
+			continue
 		}
-		return r.Path, nil
+		data, err := os.ReadFile(filepath.Join(dir, e.Name()))
+		if err != nil || len(data) == 0 {
+			continue
+		}
+		var m ReceiverMarker
+		if json.Unmarshal(data, &m) != nil || len(m.Repos) == 0 {
+			continue
+		}
+		for _, r := range m.Repos {
+			options = append(options, peerRepoEntry{hostname: e.Name(), repo: r})
+		}
+	}
+
+	if len(options) == 0 {
+		return "", "", fmt.Errorf("no receivers with registered repos found; run 'xmuggle init-recv <queue-repo>' from a git repo on the receiving machine")
+	}
+	if len(options) == 1 {
+		o := options[0]
+		fmt.Printf("Receiver: %s / %s\n", o.hostname, o.repo.Name)
+		return o.hostname, o.slug(), nil
 	}
 	if !interactive() {
-		return "", fmt.Errorf("receiver %s has %d repos; pass --repo to specify", recipientHost, len(marker.Repos))
+		return "", "", fmt.Errorf("multiple receiver repos available; run interactively to select")
 	}
-	fmt.Printf("\nReceiver %s has multiple repos:\n", recipientHost)
-	for i, r := range marker.Repos {
-		label := r.Name
-		if r.Remote != "" {
-			label += fmt.Sprintf("  (%s)", remoteToSlug(r.Remote))
-		}
-		fmt.Printf("  [%d] %s\n", i+1, label)
+
+	fmt.Println("\nSelect a receiver + repo:")
+	for i, o := range options {
+		slug := o.slug()
+		fmt.Printf("  [%d] %s / %s  (%s)\n", i+1, o.hostname, o.repo.Name, slug)
 	}
-	fmt.Print("Select repo: ")
+	fmt.Print("Choice: ")
 	reader := bufio.NewReader(os.Stdin)
 	line, _ := reader.ReadString('\n')
-	n, err := strconv.Atoi(strings.TrimSpace(line))
-	if err != nil || n < 1 || n > len(marker.Repos) {
-		return "", fmt.Errorf("invalid selection")
+	n, err3 := strconv.Atoi(strings.TrimSpace(line))
+	if err3 != nil || n < 1 || n > len(options) {
+		return "", "", fmt.Errorf("invalid selection")
 	}
-	r := marker.Repos[n-1]
-	if r.Remote != "" {
-		return remoteToSlug(r.Remote), nil
-	}
-	return r.Path, nil
+	o := options[n-1]
+	return o.hostname, o.slug(), nil
 }
 
 // cmdInitRecv sets up this machine as a receiver: base init + installs and
