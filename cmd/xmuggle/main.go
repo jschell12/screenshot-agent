@@ -64,13 +64,10 @@ Subcommands:
   rm <name>...       Remove images from ~/.xmuggle/
     --all-done         Remove all processed images
 
-  init-recv <owner/repo>   Set up this machine as a receiver (daemon)
-                           Run from a git repo to register it with this receiver
-    --peer <sender>    Cache a sender's pubkey locally
-    --json             Output peer list as JSON (for AI-driven setup)
-
-  init-send <owner/repo>   Set up this machine as a sender
-    --peer <receiver>  Set default recipient + cache pubkey
+  init <owner/repo>        Register this machine with the queue repo
+                           From a git repo: registers as receiver + installs daemon
+                           Otherwise: registers as sender
+    --peer <host>      Cache a peer's pubkey (set default recipient for senders)
     --json             Output peer list as JSON (for AI-driven setup)
 
   peers              Show registered receivers and senders
@@ -99,13 +96,14 @@ Examples:
 
     # --- On your personal laptop (receiver) ---
     cd ~/dev/my-app                                              # a git repo
-    xmuggle init-recv jschell12/xmuggle-queue
-    #   ✓ Registered git transport + my-app repo
+    xmuggle init jschell12/xmuggle-queue
+    #   ✓ Detected git repo → registered as receiver
     #   ✓ Daemon installed and running
 
     # --- On your work laptop (sender) ---
-    xmuggle init-send jschell12/xmuggle-queue
-    xmuggle add-recipient joshs-macbook-pro --default
+    xmuggle init jschell12/xmuggle-queue
+    #   ✓ Not in a git repo → registered as sender
+    #   ✓ Select receiver from discovered peers
 
     # --- Send from the work laptop ---
     xmuggle send --screenshots                                   # select receiver+repo
@@ -148,6 +146,9 @@ func main() {
 		return
 	case "list":
 		cmdList(os.Args[2:])
+		return
+	case "init":
+		cmdInit(os.Args[2:])
 		return
 	case "init-recv":
 		cmdInitRecv(os.Args[2:])
@@ -486,6 +487,10 @@ func pollForResults(taskIDs []string, poll func(string) (*queue.Result, error), 
 		}
 		if r.Status == "success" {
 			fmt.Println("Fix applied successfully!")
+			if r.Summary != "" {
+				fmt.Println()
+				fmt.Println(r.Summary)
+			}
 			if r.PRUrl != "" {
 				fmt.Println("PR:", r.PRUrl)
 			}
@@ -917,6 +922,128 @@ func selectPeerRepo(cfg *config.Config) (hostname, repoSlug string, err error) {
 	}
 	o := options[n-1]
 	return o.hostname, o.slug(), nil
+}
+
+// cmdInit registers this machine with the queue repo. If run from inside a git
+// repo, it registers as a receiver (installs daemon). Otherwise it registers as
+// a sender. In both cases it discovers peers and caches pubkeys.
+func cmdInit(args []string) {
+	opts := parseInitArgs(args, "init")
+	cfg := baseInit(opts.slug)
+
+	// If we're inside a git repo, register as receiver + install daemon.
+	_, _, inRepo := detectGitRepo()
+	if inRepo {
+		cmdInitRecvWith(cfg, opts)
+	} else {
+		cmdInitSendWith(cfg, opts)
+	}
+}
+
+func cmdInitRecvWith(cfg *config.Config, opts initArgs) {
+	var repo *ReceiverRepo
+	if remote, repoPath, ok := detectGitRepo(); ok {
+		name := filepath.Base(repoPath)
+		repo = &ReceiverRepo{
+			Name:   name,
+			Remote: remote,
+			Path:   repoPath,
+		}
+		fmt.Printf("Detected git repo: %s (%s)\n", name, repoPath)
+		if remote != "" {
+			fmt.Printf("Remote: %s\n", remote)
+		}
+	}
+
+	publishRoleMarker(cfg, "recv", repo)
+
+	fmt.Println()
+	fmt.Println("Installing daemon...")
+	if err := daemoninstall.Install(); err != nil {
+		fmt.Fprintln(os.Stderr, "Error:", err)
+		fmt.Fprintln(os.Stderr, "Fallback: run `make daemon-install` from the repo.")
+		os.Exit(1)
+	}
+	fmt.Println("Daemon installed and running.")
+
+	peers, _ := discoverPeers(cfg, "send")
+
+	if opts.useJSON {
+		emitPeersJSON(cfg, "sender", peers)
+		return
+	}
+
+	var selected string
+	switch {
+	case opts.peer != "":
+		selected = opts.peer
+	case interactive() && len(peers) > 0:
+		selected = promptSelectPeer("sender", peers)
+	default:
+		fmt.Println()
+		printDiscoveredPeers("sender", peers)
+		fmt.Println()
+		fmt.Println("This machine will now process queue tasks addressed to it.")
+		fmt.Println("On the sending machine, run:")
+		fmt.Printf("  xmuggle init %s\n", opts.slug)
+		return
+	}
+
+	if selected == "" {
+		return
+	}
+	pub, err := fetchPeerPubkey(cfg, selected)
+	if err != nil {
+		die("fetch pubkey for %s: %v", selected, err)
+	}
+	cfg.UpsertRecipient(config.Recipient{Hostname: selected, Pubkey: pub})
+	if err := config.Save(cfg); err != nil {
+		die("save config: %v", err)
+	}
+	fmt.Printf("Cached sender pubkey for: %s\n", selected)
+}
+
+func cmdInitSendWith(cfg *config.Config, opts initArgs) {
+	publishRoleMarker(cfg, "send", nil)
+
+	peers, _ := discoverPeers(cfg, "recv")
+
+	if opts.useJSON {
+		emitPeersJSON(cfg, "receiver", peers)
+		return
+	}
+
+	var selected string
+	switch {
+	case opts.peer != "":
+		selected = opts.peer
+	case interactive() && len(peers) > 0:
+		selected = promptSelectPeer("receiver", peers)
+	default:
+		fmt.Println()
+		printDiscoveredPeers("receiver", peers)
+		fmt.Println()
+		fmt.Println("Pick one with:")
+		fmt.Println("  xmuggle add-recipient <hostname> --default")
+		return
+	}
+
+	if selected == "" {
+		return
+	}
+	pub, err := fetchPeerPubkey(cfg, selected)
+	if err != nil {
+		die("fetch pubkey for %s: %v", selected, err)
+	}
+	cfg.UpsertRecipient(config.Recipient{Hostname: selected, Pubkey: pub})
+	cfg.DefaultRecipient = selected
+	if err := config.Save(cfg); err != nil {
+		die("save config: %v", err)
+	}
+	fmt.Printf("Default recipient: %s\n", selected)
+	fmt.Println()
+	fmt.Println("Ready to send. Try:")
+	fmt.Println("  xmuggle send --screenshots")
 }
 
 // cmdInitRecv sets up this machine as a receiver: base init + installs and
