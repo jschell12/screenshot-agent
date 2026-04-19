@@ -35,24 +35,20 @@ Usage:
   xmuggle <subcommand> [args]
 
 Send (submit screenshots for fixing):
-  send                     Select a receiver+repo, then send screenshots
+  send                     Send screenshot(s) for fixing
     --screenshots          Interactive picker: choose 1+ images from a list
     --img   <name>         Select image by fuzzy match (repeatable for multi-image)
     --all                  Process ALL unprocessed images
     --msg   <msg>          Context to guide the agent (what's wrong, what to fix)
     --scan                 Ingest ALL images from ~/Desktop before selecting
+    --to <host>            Override recipient (when using git transport)
 
-  Repo detection:
-    --remote --git         Receiver+repo selected from registered peers
-    local / --remote       Auto-detected from current git directory
-
-  Transport (how to process):
-    (default)              Run a Claude agent locally on this machine
-    --remote               Forward via SSH/rsync to a Mac on the LAN
-      --host <host>          Specific hostname (otherwise Bonjour discovery)
-      --user <user>          SSH user (default: $USER)
-    --remote --git         Forward via age-encrypted private GitHub queue repo
-      --to <host>            Override recipient (default: selected from peers)
+  Transport is auto-detected from config:
+    If init-send/init-recv was run  →  git (encrypted, via queue repo)
+    Otherwise                       →  local (runs agent in current repo)
+    --remote                           Override: SSH/rsync to a LAN Mac
+      --host <host>                      Specific hostname (otherwise Bonjour)
+      --user <user>                      SSH user (default: $USER)
 
 List (view available images):
   list                     Show images in ~/.xmuggle/ and their status
@@ -88,19 +84,13 @@ Image detection:
 
 Examples:
 
-  Local (run from inside the repo):
+  Local (no init — run from inside the repo):
     xmuggle list                                                 # see pending
-    xmuggle list --json                                          # JSON for AI agents
     cd ~/dev/my-app
     xmuggle send --msg "fix the button"                          # latest screenshot
     xmuggle send --screenshots                                   # pick from list
     xmuggle send --img bug1 --img bug2                           # multi-image
     xmuggle send --all                                           # all pending
-    xmuggle rec --duration 30s --repo jschell12/my-app           # screen record
-
-  Remote via SSH (same LAN, run from inside the repo):
-    xmuggle send --remote                                        # Bonjour discovery
-    xmuggle send --remote --host mac.local
 
   Remote via git (encrypted, works through VPN):
 
@@ -110,18 +100,22 @@ Examples:
     # --- On your personal laptop (receiver) ---
     cd ~/dev/my-app                                              # a git repo
     xmuggle init-recv jschell12/xmuggle-queue
-    #   ✓ Queue repo cloned + age keypair + pubkey published
+    #   ✓ Registered git transport + my-app repo
     #   ✓ Daemon installed and running
-    #   ✓ Registered my-app repo with this receiver
 
     # --- On your work laptop (sender) ---
     xmuggle init-send jschell12/xmuggle-queue
     xmuggle add-recipient joshs-macbook-pro --default
 
-    # --- Send from the work laptop (select receiver+repo) ---
-    xmuggle send --screenshots --remote --git
-    xmuggle send --remote --git --msg "fix the login form"
+    # --- Send from the work laptop ---
+    xmuggle send --screenshots                                   # select receiver+repo
+    xmuggle send --msg "fix the login form"                      # latest screenshot
     xmuggle peers                                                # who's registered
+
+  Remote via SSH (same LAN, override transport):
+    cd ~/dev/my-app
+    xmuggle send --remote                                        # Bonjour discovery
+    xmuggle send --remote --host mac.local
 
   AI agent workflow (Claude Code / Cursor):
     xmuggle list --json                                          # get images as JSON
@@ -255,6 +249,15 @@ func runMain(rawArgs []string) {
 	if a.list {
 		cmdList(nil) // legacy --list redirects to list subcommand
 		return
+	}
+
+	// Auto-detect transport from config: if init-send/init-recv was run,
+	// default to git transport without needing --remote --git.
+	if !a.remote && !a.useGit {
+		cfg, _ := config.Load()
+		if cfg != nil && cfg.Git != nil && cfg.Age != nil {
+			a.useGit = true
+		}
 	}
 
 	// For local/SSH: auto-detect repo from cwd if not given.

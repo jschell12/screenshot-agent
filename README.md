@@ -87,14 +87,14 @@ xmuggle add-recipient <receiver-hostname> --default
 
 ```bash
 # Take a screenshot on the work laptop, then:
-xmuggle send --remote --git --msg "fix the login form"
-xmuggle send --remote --git --screenshots                      # pick screenshots interactively
+xmuggle send --msg "fix the login form"
+xmuggle send --screenshots                                     # pick screenshots interactively
 
 # Or record the screen and send the frames:
 xmuggle rec --duration 30s --remote --git --msg "watch the sidebar"
 ```
 
-No `--repo` needed — when you send via `--remote --git`, you select from the receiver+repo combos that were registered during `init-recv`. If there's only one, it's auto-selected. If multiple, you're prompted to pick.
+No flags needed — `send` auto-detects git transport from the config that `init-send` created. You select from the receiver+repo combos registered during `init-recv`. If there's only one, it's auto-selected; if multiple, you're prompted.
 
 The task is age-encrypted to the receiver's pubkey, committed to the queue repo. The receiver's daemon picks it up, spawns a Claude agent, fixes the code, pushes a PR, merges it, and encrypts the result back.
 
@@ -107,15 +107,12 @@ xmuggle list-recipients  # see configured pubkeys
 
 ## Remote (SSH/rsync — same LAN, no encryption)
 
-If both Macs are on the same LAN without VPN issues:
+If both Macs are on the same LAN without VPN issues, use `--remote` to override with SSH transport:
 
 ```bash
-# cd into the repo, then send (Bonjour discovers Macs advertising SSH)
 cd ~/dev/my-app
-xmuggle send --remote
-
-# Or specify host directly
-xmuggle send --remote --host macmini.local
+xmuggle send --remote                                       # Bonjour discovery
+xmuggle send --remote --host macmini.local                   # specific host
 ```
 
 Target Mac needs the daemon: `make daemon-install` or `xmuggle init-recv <queue-repo>`.
@@ -150,10 +147,10 @@ xmuggle init-send jschell12/xmuggle-queue
 #   Lists available receivers (with their repos) — pick one:
 xmuggle add-recipient joshs-macbook-pro --default
 
-# --- Now send from the work laptop (select receiver+repo) ---
-xmuggle send --remote --git --msg "fix the login form"
-xmuggle send --all --remote --git --msg "fix all pending"
-xmuggle rec --duration 30s --remote --git --msg "UI glitch"
+# --- Now send from the work laptop ---
+xmuggle send --msg "fix the login form"                      # transport auto-detected
+xmuggle send --all --msg "fix all pending"
+xmuggle send --screenshots                                   # interactive picker
 
 # --- Check status ---
 xmuggle peers                                                # who's registered
