@@ -7,7 +7,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"sort"
 	"strings"
@@ -120,41 +119,11 @@ func listDirImages(dir string) ([]Image, error) {
 	return out, nil
 }
 
-// screenshotPaths returns paths of macOS screenshots on the Desktop.
-func screenshotPaths() []string {
-	home := config.GetPaths().Home
-	cmd := exec.Command(
-		"mdfind",
-		"kMDItemIsScreenCapture = 1",
-		"-onlyin", filepath.Join(home, "Desktop"),
-	)
-	out, err := cmd.Output()
-	if err != nil {
-		// Fallback: scan ~/Desktop for Screenshot*.png
-		imgs, _ := listDirImages(filepath.Join(home, "Desktop"))
-		var paths []string
-		for _, img := range imgs {
-			if strings.HasPrefix(img.Name, "Screenshot") {
-				paths = append(paths, img.Path)
-			}
-		}
-		return paths
-	}
-	var lines []string
-	for _, l := range strings.Split(string(out), "\n") {
-		l = strings.TrimSpace(l)
-		if l != "" {
-			lines = append(lines, l)
-		}
-	}
-	return lines
-}
-
 // ────────────────────────────────────────────────────────────────────
 // Sync: merge Desktop state into the index
 // ────────────────────────────────────────────────────────────────────
 
-// Sync discovers screenshots on ~/Desktop and adds new ones to the index.
+// Sync discovers images on ~/Desktop and adds new ones to the index.
 // Existing entries are preserved.  Returns count of newly added images.
 func Sync() (int, error) {
 	idx, err := loadIndex()
@@ -162,26 +131,19 @@ func Sync() (int, error) {
 		return 0, err
 	}
 
-	shots := screenshotPaths()
-	shotSet := make(map[string]bool, len(shots))
-	for _, p := range shots {
-		shotSet[p] = true
+	imgs, err := desktopImages()
+	if err != nil {
+		return 0, err
 	}
 
 	now := time.Now()
 	count := 0
-	for _, p := range shots {
-		if _, exists := idx.Images[p]; exists {
+	for _, img := range imgs {
+		if _, exists := idx.Images[img.Path]; exists {
 			continue
 		}
-		name := filepath.Base(p)
-		fi, err := os.Stat(p)
-		if err != nil {
-			continue
-		}
-		_ = fi
-		idx.Images[p] = &ImageEntry{
-			Name:      name,
+		idx.Images[img.Path] = &ImageEntry{
+			Name:      img.Name,
 			Status:    "pending",
 			FirstSeen: now,
 		}
