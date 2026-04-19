@@ -10,64 +10,18 @@ is_on_path() {
   esac
 }
 
-# Position of $1 within colon-separated PATH, or 99 if missing.
-path_index() {
-  local i=0
-  local IFS=:
-  for d in $PATH; do
-    if [[ "$d" == "$1" ]]; then
-      echo "$i"
-      return
-    fi
-    i=$((i + 1))
-  done
-  echo 99
-}
+BIN_DIR="$HOME/.local/bin"
+mkdir -p "$BIN_DIR"
 
-pick_prefix() {
-  # Explicit override wins.
-  if [[ -n "${INSTALL_PREFIX:-}" ]]; then
-    echo "$INSTALL_PREFIX"
-    return
-  fi
-
-  # Candidates in preference order. We only pick one that's ALREADY on PATH
-  # AND writable — this prevents the binary from being shadowed by macOS's
-  # built-in /usr/bin/look (found after /usr/bin on PATH).
-  local candidates=(
-    "$HOME/.local/bin"
-    "$HOME/bin"
-    "/opt/homebrew/bin"
-    "/usr/local/bin"
-  )
-
-  local usr_bin_idx
-  usr_bin_idx=$(path_index "/usr/bin")
-
-  for dir in "${candidates[@]}"; do
-    if ! is_on_path "$dir"; then
-      continue
-    fi
-    # Must come BEFORE /usr/bin so we win over the macOS built-in /usr/bin/look.
-    local idx
-    idx=$(path_index "$dir")
-    if (( idx >= usr_bin_idx )); then
-      continue
-    fi
-    if [[ -d "$dir" && -w "$dir" ]] || \
-       [[ ! -e "$dir" && -w "$(dirname "$dir")" ]]; then
-      mkdir -p "$dir"
-      echo "$dir"
-      return
+# Clean up old installs in other locations
+for old_dir in /opt/homebrew/bin /usr/local/bin "$HOME/bin"; do
+  for bin in xmuggle xmuggled; do
+    if [[ -f "$old_dir/$bin" ]]; then
+      rm -f "$old_dir/$bin" 2>/dev/null || sudo rm -f "$old_dir/$bin" 2>/dev/null || true
+      echo "Removed old $old_dir/$bin"
     fi
   done
-
-  # Nothing on PATH is suitable. Pick ~/.local/bin and warn later.
-  mkdir -p "$HOME/.local/bin"
-  echo "$HOME/.local/bin"
-}
-
-BIN_DIR="$(pick_prefix)"
+done
 
 echo "=== Installing /xmuggle skill + CLI ==="
 echo "Install dir: $BIN_DIR"
@@ -79,15 +33,8 @@ echo "Building..."
 
 # Install binaries
 for bin in xmuggle xmuggled; do
-  src="$REPO_DIR/bin/$bin"
-  dst="$BIN_DIR/$bin"
-  if [[ -w "$BIN_DIR" ]]; then
-    install -m 0755 "$src" "$dst"
-  else
-    echo "Installing $bin (needs sudo)..."
-    sudo install -m 0755 "$src" "$dst"
-  fi
-  echo "  $dst"
+  install -m 0755 "$REPO_DIR/bin/$bin" "$BIN_DIR/$bin"
+  echo "  $BIN_DIR/$bin"
 done
 
 # PATH diagnostics
@@ -96,20 +43,9 @@ if ! is_on_path "$BIN_DIR"; then
   echo "WARNING: $BIN_DIR is not on your PATH."
   echo "Add this to your shell rc (~/.zshrc, ~/.bashrc, etc.):"
   echo ""
-  echo "  export PATH=\"$BIN_DIR:\$PATH\""
+  echo "  export PATH=\"\$HOME/.local/bin:\$PATH\""
   echo ""
   echo "Then restart your shell or run: source ~/.zshrc"
-fi
-
-# Shadow-by-/usr/bin/look check
-ACTUAL="$(command -v xmuggle || true)"
-if [[ "$ACTUAL" != "$BIN_DIR/xmuggle" ]]; then
-  echo ""
-  echo "WARNING: 'xmuggle' resolves to $ACTUAL (not $BIN_DIR/xmuggle)"
-  if [[ "$ACTUAL" == "/usr/bin/look" ]]; then
-    echo "That's the macOS built-in 'look' utility, which shadows ours only if $BIN_DIR comes after /usr/bin."
-    echo "Fix: put $BIN_DIR earlier on PATH than /usr/bin."
-  fi
 fi
 
 # Claude Code skill
@@ -130,5 +66,5 @@ echo ""
 echo "Done! Use /xmuggle in Claude Code or Cursor."
 echo ""
 echo "Quick start:"
-echo "  xmuggle --list"
-echo "  xmuggle --repo jschell12/my-app"
+echo "  cd ~/dev/my-app && xmuggle init"
+echo "  xmuggle send --screenshots"
