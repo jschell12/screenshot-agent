@@ -40,7 +40,7 @@ Send (submit screenshots for fixing):
     --img   <name>         Select image by fuzzy match (repeatable for multi-image)
     --all                  Process ALL unprocessed images
     --msg   <msg>          Context to guide the agent (what's wrong, what to fix)
-    --scan                 Ingest ALL images from ~/Desktop before selecting
+    (screenshots are tracked automatically from ~/Desktop)
     --to <host>            Override recipient (when using git transport)
 
   Transport is auto-detected from config:
@@ -80,7 +80,7 @@ Subcommands:
 Image detection:
   Screenshots are auto-detected from ~/Desktop via macOS Spotlight on
   every run. No manual step needed — just take a screenshot and go.
-  Use --scan to also ingest non-screenshot images.
+  Tracked images are stored in ~/.xmuggle/images.json.
 
 Examples:
 
@@ -177,7 +177,7 @@ func main() {
 
 type mainArgs struct {
 	repo, message, host, user, to string
-	remote, useGit, list, scan, all, screenshots bool
+	remote, useGit, list, all, screenshots bool
 	imgs []string
 }
 
@@ -221,8 +221,6 @@ func parseMainArgs(args []string) *mainArgs {
 			a.useGit = true
 		case "--list":
 			a.list = true
-		case "--scan":
-			a.scan = true
 		case "--all":
 			a.all = true
 		case "--screenshots":
@@ -234,17 +232,6 @@ func parseMainArgs(args []string) *mainArgs {
 
 func runMain(rawArgs []string) {
 	a := parseMainArgs(rawArgs)
-
-	if a.scan {
-		n, err := images.IngestAll()
-		if err != nil {
-			die("scan: %v", err)
-		}
-		fmt.Printf("Ingested %d image(s) into ~/.xmuggle/\n", n)
-		if a.repo == "" {
-			return
-		}
-	}
 
 	if a.list {
 		cmdList(nil) // legacy --list redirects to list subcommand
@@ -297,7 +284,7 @@ func runMain(rawArgs []string) {
 			die("find unprocessed: %v", err)
 		}
 		if len(ups) == 0 {
-			die("No unprocessed images. Take a screenshot or run --scan.")
+			die("No unprocessed images. Take a screenshot on ~/Desktop.")
 		}
 		for _, img := range ups {
 			shotPaths = append(shotPaths, img.Path)
@@ -309,7 +296,7 @@ func runMain(rawArgs []string) {
 			die("find latest: %v", err)
 		}
 		if img == nil {
-			die("No unprocessed images. Take a screenshot or run --scan.")
+			die("No unprocessed images. Take a screenshot on ~/Desktop.")
 		}
 		shotPaths = []string{img.Path}
 	}
@@ -529,16 +516,12 @@ func pollForResults(taskIDs []string, poll func(string) (*queue.Result, error), 
 // promptSelectScreenshots shows an interactive numbered list of images (newest
 // first, images only) and lets the user pick one or more by number.
 func promptSelectScreenshots() []string {
-	n, _ := images.AutoIngest()
-	if n > 0 {
-		fmt.Printf("Auto-ingested %d new screenshot(s)\n\n", n)
-	}
 	imgs, err := images.ListAll()
 	if err != nil {
 		die("list: %v", err)
 	}
 	if len(imgs) == 0 {
-		die("No images in ~/.xmuggle/\nTake a screenshot, or run --scan to ingest images from ~/Desktop.")
+		die("No screenshots found on ~/Desktop.")
 	}
 
 	fmt.Printf("Select screenshot(s) to send (newest first):\n\n")
@@ -625,10 +608,6 @@ func cmdList(args []string) {
 		}
 	}
 
-	n, _ := images.AutoIngest()
-	if !useJSON && n > 0 {
-		fmt.Printf("Auto-ingested %d new screenshot(s)\n\n", n)
-	}
 	imgs, err := images.ListAll()
 	if err != nil {
 		die("list: %v", err)
@@ -665,8 +644,7 @@ func cmdList(args []string) {
 	}
 
 	if len(imgs) == 0 {
-		fmt.Println("No images in ~/.xmuggle/")
-		fmt.Println("Take a screenshot, or run --scan to ingest all images from ~/Desktop.")
+		fmt.Println("No screenshots found on ~/Desktop.")
 		return
 	}
 	unprocessed := 0

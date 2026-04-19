@@ -1,11 +1,11 @@
-// Package images manages the ~/.xmuggle image store, auto-ingesting screenshots
-// from ~/Desktop via macOS Spotlight (kMDItemIsScreenCapture).
+// Package images tracks screenshots on ~/Desktop via a JSON index stored
+// in ~/.xmuggle/images.json.  Images are never copied — they stay on the
+// Desktop and are referenced by their original path.
 package images
 
 import (
-	"bufio"
+	"encoding/json"
 	"fmt"
-	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -20,65 +20,71 @@ var imageExts = map[string]bool{
 	".png": true, ".jpg": true, ".jpeg": true, ".webp": true, ".gif": true,
 }
 
-func trackedFile() string { return filepath.Join(config.GetPaths().ConfigDir, ".tracked") }
-func seenFile() string    { return filepath.Join(config.GetPaths().ConfigDir, ".seen") }
-
-// ensureDirAndFiles makes sure .tracked and .seen exist.
-func ensureDirAndFiles() error {
-	if err := config.EnsureDirs(); err != nil {
-		return err
-	}
-	for _, f := range []string{trackedFile(), seenFile()} {
-		if _, err := os.Stat(f); os.IsNotExist(err) {
-			if err := os.WriteFile(f, []byte("# Managed by xmuggle\n"), 0o644); err != nil {
-				return err
-			}
-		}
-	}
-	return nil
-}
-
-func loadSet(path string) (map[string]struct{}, error) {
-	set := map[string]struct{}{}
-	f, err := os.Open(path)
-	if err != nil {
-		if os.IsNotExist(err) {
-			return set, nil
-		}
-		return nil, err
-	}
-	defer f.Close()
-	s := bufio.NewScanner(f)
-	for s.Scan() {
-		line := strings.TrimSpace(s.Text())
-		if line == "" || strings.HasPrefix(line, "#") {
-			continue
-		}
-		set[line] = struct{}{}
-	}
-	return set, s.Err()
-}
-
-func appendLine(path, line string) error {
-	f, err := os.OpenFile(path, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o644)
-	if err != nil {
-		return err
-	}
-	defer f.Close()
-	_, err = f.WriteString(line + "\n")
-	return err
-}
-
 func isImage(name string) bool {
 	return imageExts[strings.ToLower(filepath.Ext(name))]
 }
 
-// Image describes an entry in the store.
-type Image struct {
-	Path        string
-	Name        string
-	IsProcessed bool
-	ModTime     time.Time
+// ────────────────────────────────────────────────────────────────────
+// JSON index
+// ────────────────────────────────────────────────────────────────────
+
+func indexPath() string {
+	return filepath.Join(config.GetPaths().ConfigDir, "images.json")
+}
+
+// ImageEntry is a single tracked image.
+type ImageEntry struct {
+	Name        string    `json:"name"`
+	Status      string    `json:"status"` // "pending" or "done"
+	FirstSeen   time.Time `json:"first_seen"`
+	ProcessedAt *time.Time `json:"processed_at,omitempty"`
+}
+
+// imageIndex is the on-disk format.
+type imageIndex struct {
+	Images map[string]*ImageEntry `json:"images"` // key = absolute path
+}
+
+func loadIndex() (*imageIndex, error) {
+	idx := &imageIndex{Images: make(map[string]*ImageEntry)}
+	data, err := os.ReadFile(indexPath())
+	if err != nil {
+		if os.IsNotExist(err) {
+			return idx, nil
+		}
+		return nil, err
+	}
+	if err := json.Unmarshal(data, idx); err != nil {
+		return nil, err
+	}
+	if idx.Images == nil {
+		idx.Images = make(map[string]*ImageEntry)
+	}
+	return idx, nil
+}
+
+func saveIndex(idx *imageIndex) error {
+	if err := config.EnsureDirs(); err != nil {
+		return err
+	}
+	data, err := json.MarshalIndent(idx, "", "  ")
+	if err != nil {
+		return err
+	}
+	return os.WriteFile(indexPath(), data, 0o644)
+}
+
+// ────────────────────────────────────────────────────────────────────
+// Desktop scanning
+// ────────────────────────────────────────────────────────────────────
+
+func desktopDir() string {
+	return filepath.Join(config.GetPaths().Home, "Desktop")
+}
+
+// desktopImages returns all image files on ~/Desktop sorted newest-first.
+func desktopImages() ([]Image, error) {
+	return listDirImages(desktopDir())
 }
 
 func listDirImages(dir string) ([]Image, error) {
@@ -114,63 +120,8 @@ func listDirImages(dir string) ([]Image, error) {
 	return out, nil
 }
 
-// MarkProcessed appends the filename to .tracked.
-func MarkProcessed(absPath string) error {
-	if err := ensureDirAndFiles(); err != nil {
-		return err
-	}
-	return appendLine(trackedFile(), filepath.Base(absPath))
-}
-
-// markSeen appends a source path to .seen to prevent re-ingesting.
-func markSeen(src string) error {
-	return appendLine(seenFile(), src)
-}
-
-// ingestCopy copies src into ~/.xmuggle/, deduping on name collision.
-func ingestCopy(src string) (string, error) {
-	if err := ensureDirAndFiles(); err != nil {
-		return "", err
-	}
-	root := config.GetPaths().ConfigDir
-	name := filepath.Base(src)
-	dest := filepath.Join(root, name)
-	if _, err := os.Stat(dest); err == nil {
-		ext := filepath.Ext(name)
-		stem := strings.TrimSuffix(name, ext)
-		dest = filepath.Join(root, fmt.Sprintf("%s-%d%s", stem, time.Now().UnixMilli(), ext))
-	}
-	if err := copyFile(src, dest); err != nil {
-		return "", err
-	}
-	if err := markSeen(src); err != nil {
-		return "", err
-	}
-	return dest, nil
-}
-
-func copyFile(src, dst string) error {
-	in, err := os.Open(src)
-	if err != nil {
-		return err
-	}
-	defer in.Close()
-	out, err := os.Create(dst)
-	if err != nil {
-		return err
-	}
-	defer out.Close()
-	_, err = io.Copy(out, in)
-	return err
-}
-
-// findNewScreenshots uses Spotlight to list screenshots not yet in .seen.
-func findNewScreenshots() ([]string, error) {
-	seen, err := loadSet(seenFile())
-	if err != nil {
-		return nil, err
-	}
-
+// screenshotPaths returns paths of macOS screenshots on the Desktop.
+func screenshotPaths() []string {
 	home := config.GetPaths().Home
 	cmd := exec.Command(
 		"mdfind",
@@ -181,15 +132,14 @@ func findNewScreenshots() ([]string, error) {
 	if err != nil {
 		// Fallback: scan ~/Desktop for Screenshot*.png
 		imgs, _ := listDirImages(filepath.Join(home, "Desktop"))
-		var cand []string
+		var paths []string
 		for _, img := range imgs {
 			if strings.HasPrefix(img.Name, "Screenshot") {
-				cand = append(cand, img.Path)
+				paths = append(paths, img.Path)
 			}
 		}
-		return filterUnseen(cand, seen), nil
+		return paths
 	}
-
 	var lines []string
 	for _, l := range strings.Split(string(out), "\n") {
 		l = strings.TrimSpace(l)
@@ -197,88 +147,108 @@ func findNewScreenshots() ([]string, error) {
 			lines = append(lines, l)
 		}
 	}
-	return filterUnseen(lines, seen), nil
+	return lines
 }
 
-func filterUnseen(paths []string, seen map[string]struct{}) []string {
-	var out []string
-	for _, p := range paths {
-		if _, ok := seen[p]; ok {
-			continue
-		}
-		if _, err := os.Stat(p); err == nil {
-			out = append(out, p)
-		}
-	}
-	return out
-}
+// ────────────────────────────────────────────────────────────────────
+// Sync: merge Desktop state into the index
+// ────────────────────────────────────────────────────────────────────
 
-// AutoIngest pulls new screenshots from ~/Desktop into ~/.xmuggle. Returns count.
-func AutoIngest() (int, error) {
-	newShots, err := findNewScreenshots()
+// Sync discovers screenshots on ~/Desktop and adds new ones to the index.
+// Existing entries are preserved.  Returns count of newly added images.
+func Sync() (int, error) {
+	idx, err := loadIndex()
 	if err != nil {
 		return 0, err
 	}
+
+	shots := screenshotPaths()
+	shotSet := make(map[string]bool, len(shots))
+	for _, p := range shots {
+		shotSet[p] = true
+	}
+
+	now := time.Now()
 	count := 0
-	for _, p := range newShots {
-		if _, err := ingestCopy(p); err == nil {
-			count++
+	for _, p := range shots {
+		if _, exists := idx.Images[p]; exists {
+			continue
 		}
+		name := filepath.Base(p)
+		fi, err := os.Stat(p)
+		if err != nil {
+			continue
+		}
+		_ = fi
+		idx.Images[p] = &ImageEntry{
+			Name:      name,
+			Status:    "pending",
+			FirstSeen: now,
+		}
+		count++
+	}
+
+	// Prune entries whose files no longer exist on Desktop
+	for p := range idx.Images {
+		if _, err := os.Stat(p); os.IsNotExist(err) {
+			delete(idx.Images, p)
+		}
+	}
+
+	if err := saveIndex(idx); err != nil {
+		return 0, err
 	}
 	return count, nil
 }
 
-// IngestAll copies ALL images from ~/Desktop (not just screenshots).
-func IngestAll() (int, error) {
-	seen, err := loadSet(seenFile())
-	if err != nil {
-		return 0, err
-	}
-	imgs, err := listDirImages(filepath.Join(config.GetPaths().Home, "Desktop"))
-	if err != nil {
-		return 0, err
-	}
-	count := 0
-	for _, img := range imgs {
-		if _, ok := seen[img.Path]; ok {
-			continue
-		}
-		if _, err := ingestCopy(img.Path); err == nil {
-			count++
-		}
-	}
-	return count, nil
+// ────────────────────────────────────────────────────────────────────
+// Public API
+// ────────────────────────────────────────────────────────────────────
+
+// Image describes an entry visible to callers.
+type Image struct {
+	Path        string
+	Name        string
+	IsProcessed bool
+	ModTime     time.Time
 }
 
-// storeImages lists images currently in ~/.xmuggle with status.
-func storeImages() ([]Image, error) {
-	if err := ensureDirAndFiles(); err != nil {
+// ListAll syncs and returns all tracked images (newest first).
+func ListAll() ([]Image, error) {
+	if _, err := Sync(); err != nil {
 		return nil, err
 	}
-	tracked, err := loadSet(trackedFile())
-	if err != nil {
-		return nil, err
-	}
-	imgs, err := listDirImages(config.GetPaths().ConfigDir)
-	if err != nil {
-		return nil, err
-	}
-	for i := range imgs {
-		_, ok := tracked[imgs[i].Name]
-		imgs[i].IsProcessed = ok
-	}
-	return imgs, nil
+	return indexedImages()
 }
 
-// ListAll returns every image in the store.
-func ListAll() ([]Image, error) { return storeImages() }
+func indexedImages() ([]Image, error) {
+	idx, err := loadIndex()
+	if err != nil {
+		return nil, err
+	}
+	var out []Image
+	for p, entry := range idx.Images {
+		fi, err := os.Stat(p)
+		if err != nil {
+			continue // file gone
+		}
+		out = append(out, Image{
+			Path:        p,
+			Name:        entry.Name,
+			IsProcessed: entry.Status == "done",
+			ModTime:     fi.ModTime(),
+		})
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].ModTime.After(out[j].ModTime) })
+	return out, nil
+}
 
-// Latest returns the newest unprocessed image, auto-ingesting first.
+// Latest returns the newest unprocessed image after syncing.
 func Latest() (*Image, error) {
-	if _, err := AutoIngest(); err != nil {
+	if _, err := Sync(); err != nil {
 		return nil, err
 	}
-	imgs, err := storeImages()
+	imgs, err := indexedImages()
 	if err != nil {
 		return nil, err
 	}
@@ -292,10 +262,10 @@ func Latest() (*Image, error) {
 
 // AllUnprocessed returns every unprocessed image, newest first.
 func AllUnprocessed() ([]Image, error) {
-	if _, err := AutoIngest(); err != nil {
+	if _, err := Sync(); err != nil {
 		return nil, err
 	}
-	imgs, err := storeImages()
+	imgs, err := indexedImages()
 	if err != nil {
 		return nil, err
 	}
@@ -308,12 +278,12 @@ func AllUnprocessed() ([]Image, error) {
 	return out, nil
 }
 
-// FindByName resolves a fuzzy query to a single image, auto-ingesting first.
+// FindByName resolves a fuzzy query to a single image after syncing.
 func FindByName(query string) (*Image, error) {
-	if _, err := AutoIngest(); err != nil {
+	if _, err := Sync(); err != nil {
 		return nil, err
 	}
-	imgs, err := storeImages()
+	imgs, err := indexedImages()
 	if err != nil {
 		return nil, err
 	}
@@ -344,22 +314,51 @@ func FindByName(query string) (*Image, error) {
 	return nil, nil
 }
 
-// Remove deletes the image file at absPath from ~/.xmuggle/. It does NOT
-// touch .seen or .tracked, so a removed image won't be re-ingested from
-// ~/Desktop (its source is still marked seen).
-func Remove(absPath string) error {
-	return os.Remove(absPath)
+// MarkProcessed marks an image as done in the index.
+func MarkProcessed(absPath string) error {
+	idx, err := loadIndex()
+	if err != nil {
+		return err
+	}
+	entry, ok := idx.Images[absPath]
+	if !ok {
+		// Image not tracked yet — add it
+		now := time.Now()
+		entry = &ImageEntry{
+			Name:      filepath.Base(absPath),
+			Status:    "done",
+			FirstSeen: now,
+		}
+		entry.ProcessedAt = &now
+		idx.Images[absPath] = entry
+	} else {
+		now := time.Now()
+		entry.Status = "done"
+		entry.ProcessedAt = &now
+	}
+	return saveIndex(idx)
 }
 
-// RemoveByName fuzzy-matches and deletes a single image. Returns the
-// filename that was removed.
+// Remove removes an image from the tracking index (does NOT delete the
+// file from Desktop).
+func Remove(absPath string) error {
+	idx, err := loadIndex()
+	if err != nil {
+		return err
+	}
+	delete(idx.Images, absPath)
+	return saveIndex(idx)
+}
+
+// RemoveByName fuzzy-matches and removes a single image from tracking.
+// Returns the filename that was removed.
 func RemoveByName(query string) (string, error) {
 	img, err := FindByName(query)
 	if err != nil {
 		return "", err
 	}
 	if img == nil {
-		return "", fmt.Errorf("no image matching %q in ~/.xmuggle/", query)
+		return "", fmt.Errorf("no image matching %q", query)
 	}
 	if err := Remove(img.Path); err != nil {
 		return "", err
@@ -367,22 +366,23 @@ func RemoveByName(query string) (string, error) {
 	return img.Name, nil
 }
 
-// RemoveAllDone deletes every image currently marked processed (in .tracked).
+// RemoveAllDone removes every processed image from tracking.
 // Returns the list of removed filenames.
 func RemoveAllDone() ([]string, error) {
-	imgs, err := ListAll()
+	idx, err := loadIndex()
 	if err != nil {
 		return nil, err
 	}
 	var removed []string
-	for _, img := range imgs {
-		if !img.IsProcessed {
+	for p, entry := range idx.Images {
+		if entry.Status != "done" {
 			continue
 		}
-		if err := Remove(img.Path); err != nil {
-			continue
-		}
-		removed = append(removed, img.Name)
+		removed = append(removed, entry.Name)
+		delete(idx.Images, p)
+	}
+	if err := saveIndex(idx); err != nil {
+		return nil, err
 	}
 	return removed, nil
 }

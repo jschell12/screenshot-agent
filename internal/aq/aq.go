@@ -4,6 +4,7 @@ package aq
 import (
 	"bytes"
 	"encoding/json"
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -20,19 +21,31 @@ func ScriptsDir() string {
 	return filepath.Join(home, "development/github.com/jschell12/agent-queue/scripts")
 }
 
-func aq(args ...string) (string, int, error) {
+type aqResult struct {
+	stdout string
+	stderr string
+	code   int
+}
+
+func aqRun(args ...string) (aqResult, error) {
 	cmd := exec.Command(filepath.Join(ScriptsDir(), "agent-queue"), args...)
 	var so, se bytes.Buffer
 	cmd.Stdout = &so
 	cmd.Stderr = &se
 	err := cmd.Run()
 	if err == nil {
-		return so.String(), 0, nil
+		return aqResult{stdout: so.String(), stderr: se.String(), code: 0}, nil
 	}
 	if ee, ok := err.(*exec.ExitError); ok {
-		return so.String(), ee.ExitCode(), nil
+		return aqResult{stdout: so.String(), stderr: se.String(), code: ee.ExitCode()}, nil
 	}
-	return so.String(), 1, err
+	return aqResult{stdout: so.String(), stderr: se.String(), code: 1}, err
+}
+
+// aq is a convenience wrapper that discards stderr (use aqRun when you need it).
+func aq(args ...string) (string, int, error) {
+	r, err := aqRun(args...)
+	return r.stdout, r.code, err
 }
 
 // Init creates the queue for a project (idempotent).
@@ -70,12 +83,15 @@ type CloneInfo struct {
 }
 
 func Clone(repoURL, agentID, parentDir string) (*CloneInfo, error) {
-	out, code, err := aq("clone", repoURL, agentID, "--parent", parentDir)
-	if err != nil || code != 0 {
+	r, err := aqRun("clone", repoURL, agentID, "--parent", parentDir)
+	if err != nil {
 		return nil, err
 	}
+	if r.code != 0 {
+		return nil, fmt.Errorf("aq clone exited %d: %s%s", r.code, r.stdout, r.stderr)
+	}
 	info := &CloneInfo{}
-	if err := json.Unmarshal([]byte(out), info); err != nil {
+	if err := json.Unmarshal([]byte(r.stdout), info); err != nil {
 		return nil, err
 	}
 	return info, nil
