@@ -161,6 +161,19 @@ function formatHistoryForPrompt(history) {
   return text;
 }
 
+// ── Relay host ──
+
+const RELAY_FILE = path.join(os.homedir(), '.xmuggle', 'relay-host');
+
+function getRelayHost() {
+  try { return fs.readFileSync(RELAY_FILE, 'utf8').trim(); } catch { return ''; }
+}
+
+function setRelayHost(host) {
+  fs.mkdirSync(path.dirname(RELAY_FILE), { recursive: true });
+  fs.writeFileSync(RELAY_FILE, host.trim() + '\n');
+}
+
 function mediaType(filePath) {
   const ext = path.extname(filePath).toLowerCase();
   const types = { '.png': 'image/png', '.jpg': 'image/jpeg', '.jpeg': 'image/jpeg', '.webp': 'image/webp', '.gif': 'image/gif' };
@@ -483,4 +496,4 @@ function buildConversation(messages) {
   return conv;
 }
 
-module.exports = { getApiKey, setApiKey, resetApiKey, hasApiKey, getGhToken, setGhToken, resetGhToken, hasGhToken, getModel, setModel, listModels, analyzeAndFix };
+module.exports = { getApiKey, setApiKey, resetApiKey, hasApiKey, getGhToken, setGhToken, resetGhToken, hasGhToken, getModel, setModel, listModels, getRelayHost, setRelayHost, analyzeAndFix };

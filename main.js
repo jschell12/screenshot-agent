@@ -1,4 +1,5 @@
 const { app, BrowserWindow, ipcMain, shell, dialog } = require('electron');
+const http = require('http');
 const path = require('path');
 const fs = require('fs');
 const os = require('os');
@@ -7,6 +8,8 @@ const DESKTOP = path.join(os.homedir(), 'Desktop');
 const XMUGGLE_DIR = path.join(os.homedir(), '.xmuggle');
 const PROJECTS_FILE = path.join(XMUGGLE_DIR, 'projects.json');
 const TASKS_FILE = path.join(XMUGGLE_DIR, 'tasks.json');
+const INBOX_DIR = path.join(XMUGGLE_DIR, 'inbox');
+const SERVER_PORT = 24816;
 const IMAGE_EXTS = new Set(['.png', '.jpg', '.jpeg', '.webp', '.gif']);
 
 // ── Projects ──
@@ -86,16 +89,15 @@ function syncTaskStatuses() {
 
 // ── Images ──
 
-function getDesktopImages() {
-  const tasks = syncTaskStatuses();
+function scanDir(dir, tasks) {
+  const images = [];
   try {
-    const entries = fs.readdirSync(DESKTOP);
-    const images = [];
+    const entries = fs.readdirSync(dir);
     for (const name of entries) {
       if (name.startsWith('.')) continue;
       const ext = path.extname(name).toLowerCase();
       if (!IMAGE_EXTS.has(ext)) continue;
-      const full = path.join(DESKTOP, name);
+      const full = path.join(dir, name);
       try {
         const stat = fs.statSync(full);
         const task = tasks[full];
@@ -105,11 +107,15 @@ function getDesktopImages() {
         images.push({ path: full, name, mtime: stat.mtimeMs, status, projectPath, conversation });
       } catch {}
     }
-    images.sort((a, b) => b.mtime - a.mtime);
-    return images;
-  } catch {
-    return [];
-  }
+  } catch {}
+  return images;
+}
+
+function getDesktopImages() {
+  const tasks = syncTaskStatuses();
+  const images = [...scanDir(DESKTOP, tasks), ...scanDir(INBOX_DIR, tasks)];
+  images.sort((a, b) => b.mtime - a.mtime);
+  return images;
 }
 
 // ── Window ──
@@ -194,6 +200,27 @@ app.whenReady().then(() => {
   ipcMain.handle('list-models', () => api.listModels());
   ipcMain.handle('open-external', (_, url) => shell.openExternal(url));
 
+  // Relay
+  ipcMain.handle('get-relay-host', () => api.getRelayHost());
+  ipcMain.handle('set-relay-host', (_, host) => { api.setRelayHost(host); return true; });
+  ipcMain.handle('send-to-relay', async (_, imagePath, project, message) => {
+    const host = api.getRelayHost();
+    if (!host) throw new Error('No relay host configured');
+    const imageData = fs.readFileSync(imagePath).toString('base64');
+    const filename = path.basename(imagePath);
+    const body = JSON.stringify({ image: imageData, filename, project, message });
+    const resp = await fetch(`http://${host}:${SERVER_PORT}/submit`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body,
+    });
+    if (!resp.ok) {
+      const err = await resp.text();
+      throw new Error(`Relay error ${resp.status}: ${err}`);
+    }
+    return await resp.json();
+  });
+
   // Send
   ipcMain.handle('send-to-api', async (event, imagePaths, projectPath, message) => {
     const imgPath = imagePaths[0];
@@ -255,7 +282,80 @@ app.whenReady().then(() => {
     return task ? (task.conversation || []) : [];
   });
 
-  createWindow();
+  const win = createWindow();
+
+  // ── Relay server: receive images from remote xmuggle instances ──
+  fs.mkdirSync(INBOX_DIR, { recursive: true });
+
+  // Watch inbox for new images
+  try {
+    fs.watch(INBOX_DIR, () => {
+      try { win.webContents.send('images-updated', getDesktopImages()); } catch {}
+    });
+  } catch {}
+
+  const server = http.createServer((req, res) => {
+    // CORS
+    res.setHeader('Access-Control-Allow-Origin', '*');
+    res.setHeader('Access-Control-Allow-Methods', 'POST, GET, OPTIONS');
+    res.setHeader('Access-Control-Allow-Headers', 'Content-Type');
+    if (req.method === 'OPTIONS') { res.writeHead(200); res.end(); return; }
+
+    if (req.method === 'GET' && req.url === '/status') {
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ status: 'ok', projects: listProjects() }));
+      return;
+    }
+
+    if (req.method === 'POST' && req.url === '/submit') {
+      let body = [];
+      req.on('data', chunk => body.push(chunk));
+      req.on('end', () => {
+        try {
+          const data = JSON.parse(Buffer.concat(body).toString());
+          const { image, filename, project, message } = data;
+          if (!image || !filename) {
+            res.writeHead(400, { 'Content-Type': 'application/json' });
+            res.end(JSON.stringify({ error: 'image and filename required' }));
+            return;
+          }
+
+          // Save image to inbox
+          const imgPath = path.join(INBOX_DIR, filename);
+          fs.writeFileSync(imgPath, Buffer.from(image, 'base64'));
+
+          // Pre-assign project and message if provided
+          if (project) {
+            const taskId = Date.now().toString(36) + Math.random().toString(36).slice(2, 6);
+            updateTaskStatus(imgPath, project, taskId, 'new', '', [
+              { role: 'user', text: message || '' }
+            ]);
+          }
+
+          // Save the message as a sidecar so the UI can show it
+          if (message) {
+            fs.writeFileSync(imgPath + '.msg', message);
+          }
+
+          try { win.webContents.send('images-updated', getDesktopImages()); } catch {}
+
+          res.writeHead(200, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ status: 'received', path: imgPath }));
+        } catch (e) {
+          res.writeHead(400, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ error: e.message }));
+        }
+      });
+      return;
+    }
+
+    res.writeHead(404);
+    res.end('Not found');
+  });
+
+  server.listen(SERVER_PORT, '0.0.0.0', () => {
+    console.log(`xmuggle relay server listening on port ${SERVER_PORT}`);
+  });
 });
 
 app.on('window-all-closed', () => app.quit());

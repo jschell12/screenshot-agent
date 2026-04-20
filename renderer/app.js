@@ -338,6 +338,7 @@ function promptAndSend(img) {
       <textarea id="context-input" placeholder="What's wrong? What should be fixed?" rows="3"></textarea>
       <div class="modal-actions">
         <button id="modal-cancel" class="link-btn">Cancel</button>
+        <button id="modal-relay" class="link-btn" style="display:none;">Relay</button>
         <button id="modal-send" class="modal-send-btn" ${projects.length === 0 ? 'disabled' : ''}>Send</button>
       </div>
     </div>
@@ -350,6 +351,21 @@ function promptAndSend(img) {
 
   document.getElementById('modal-cancel').addEventListener('click', () => modal.remove());
   modal.addEventListener('click', (e) => { if (e.target === modal) modal.remove(); });
+
+  // Show relay button if relay host is configured
+  const relayHost = relayInput.value.trim();
+  const relayBtn = document.getElementById('modal-relay');
+  if (relayHost) {
+    relayBtn.style.display = '';
+    relayBtn.textContent = 'Relay to ' + relayHost;
+    relayBtn.addEventListener('click', () => {
+      const projectPath = projectSelect.value;
+      if (!projectPath) return;
+      const message = contextInput.value.trim();
+      modal.remove();
+      relayImage(img, projectPath, message);
+    });
+  }
 
   const doSend = () => {
     const projectPath = projectSelect.value;
@@ -441,6 +457,24 @@ async function addToConversation(imgPath, role, text) {
   console.log(`Adding to conversation for ${imgPath}: [${role}] ${text}`);
 }
 
+async function relayImage(img, projectPath, message) {
+  processingSet.add(img.path);
+  const images = await window.xmuggle.getImages();
+  render(images);
+
+  try {
+    const result = await window.xmuggle.sendToRelay(img.path, projectPath, message || '');
+    processingSet.delete(img.path);
+    showToast('Sent to relay: ' + (result.path || 'received'), false);
+  } catch (err) {
+    processingSet.delete(img.path);
+    showToast('Relay error: ' + err.message, true);
+  }
+
+  const updated = await window.xmuggle.getImages();
+  render(updated);
+}
+
 // ── API Key ──
 
 async function initApiKey() {
@@ -528,6 +562,30 @@ ghTokenInput.addEventListener('keydown', (e) => {
   if (e.key === 'Enter') ghTokenSave.click();
 });
 
+// ── Relay Host ──
+
+const relayInput = document.getElementById('relay-input');
+const relayStatusEl = document.getElementById('relay-status');
+
+async function initRelay() {
+  const host = await window.xmuggle.getRelayHost();
+  if (host) {
+    relayInput.value = host;
+    relayStatusEl.textContent = '';
+    relayStatusEl.style.color = '#00b894';
+  }
+}
+
+relayInput.addEventListener('change', async () => {
+  const host = relayInput.value.trim();
+  await window.xmuggle.setRelayHost(host);
+  if (host) {
+    showToast(`Relay: ${host}`, false);
+  } else {
+    showToast('Relay disabled', false);
+  }
+});
+
 // ── Model Selector ──
 
 async function initModelSelect() {
@@ -575,5 +633,6 @@ window.xmuggle.onTaskProgress((imgPath, msg) => {
 initApiKey();
 initGhToken();
 initModelSelect();
+initRelay();
 loadProjects();
 refresh();

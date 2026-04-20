@@ -36,7 +36,7 @@ header h1 {
   align-items: center;
 }
 
-#api-key-input, #gh-token-input {
+#api-key-input, #gh-token-input, #relay-input {
   background: #1a1a2e;
   border: 1px solid #0f3460;
   color: #e0e0e0;

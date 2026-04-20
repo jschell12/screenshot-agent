@@ -18,6 +18,9 @@ contextBridge.exposeInMainWorld('xmuggle', {
   sendToApi: (imagePaths, projectPath, message) => ipcRenderer.invoke('send-to-api', imagePaths, projectPath, message),
   sendFollowup: (imgPath, message) => ipcRenderer.invoke('send-followup', imgPath, message),
   getConversation: (imgPath) => ipcRenderer.invoke('get-conversation', imgPath),
+  getRelayHost: () => ipcRenderer.invoke('get-relay-host'),
+  setRelayHost: (host) => ipcRenderer.invoke('set-relay-host', host),
+  sendToRelay: (imagePath, project, message) => ipcRenderer.invoke('send-to-relay', imagePath, project, message),
   openExternal: (url) => ipcRenderer.invoke('open-external', url),
   onImagesUpdated: (callback) => {
     ipcRenderer.on('images-updated', (_, images) => callback(images));
