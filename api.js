@@ -6,10 +6,18 @@ const crypto = require('crypto');
 
 const API_KEY_FILE = path.join(os.homedir(), '.xmuggle', 'api-key');
 const GH_TOKEN_FILE = path.join(os.homedir(), '.xmuggle', 'gh-token');
+const MODEL_FILE = path.join(os.homedir(), '.xmuggle', 'model');
 const WORK_DIR = path.join(os.homedir(), '.xmuggle', 'work');
 const API_URL = 'https://api.anthropic.com/v1/messages';
-const MODEL = 'claude-sonnet-4-20250514';
+const DEFAULT_MODEL = 'claude-sonnet-4-6-20250414';
 const MAX_TOKENS = 8192;
+
+const AVAILABLE_MODELS = [
+  { id: 'claude-opus-4-6-20250415', label: 'Opus 4.6' },
+  { id: 'claude-sonnet-4-6-20250414', label: 'Sonnet 4.6' },
+  { id: 'claude-sonnet-4-20250514', label: 'Sonnet 4' },
+  { id: 'claude-haiku-4-5-20251001', label: 'Haiku 4.5' },
+];
 
 const SYSTEM_PROMPT = `You are a code fix agent. You analyze screenshots showing bugs, UI issues, or errors, and fix the code.
 
@@ -82,6 +90,24 @@ function hasGhToken() {
   return !!getGhToken();
 }
 
+function getModel() {
+  try {
+    const saved = fs.readFileSync(MODEL_FILE, 'utf8').trim();
+    if (AVAILABLE_MODELS.some(m => m.id === saved)) return saved;
+  } catch {}
+  return DEFAULT_MODEL;
+}
+
+function setModel(modelId) {
+  const dir = path.dirname(MODEL_FILE);
+  fs.mkdirSync(dir, { recursive: true });
+  fs.writeFileSync(MODEL_FILE, modelId.trim() + '\n');
+}
+
+function listModels() {
+  return AVAILABLE_MODELS;
+}
+
 function gitEnv() {
   const token = getGhToken();
   if (!token) return process.env;
@@ -146,7 +172,7 @@ async function callClaude(messages) {
   if (!apiKey) throw new Error('No API key. Set ANTHROPIC_API_KEY or save to ~/.xmuggle/api-key');
 
   const body = {
-    model: MODEL,
+    model: getModel(),
     max_tokens: MAX_TOKENS,
     system: SYSTEM_PROMPT,
     tools: [EDIT_FILE_TOOL],
@@ -268,7 +294,7 @@ async function analyzeAndFix({ imagePaths, projectPath, message, onProgress, pri
   }
 
   // Call API
-  log(`Calling Claude API (${MODEL})…`);
+  log(`Calling Claude API (${getModel()})…`);
   const result = await callClaude(messages);
 
   log('API response received, parsing…');
@@ -394,4 +420,4 @@ function buildConversation(messages) {
   return conv;
 }
 
-module.exports = { getApiKey, setApiKey, resetApiKey, hasApiKey, getGhToken, setGhToken, resetGhToken, hasGhToken, analyzeAndFix };
+module.exports = { getApiKey, setApiKey, resetApiKey, hasApiKey, getGhToken, setGhToken, resetGhToken, hasGhToken, getModel, setModel, listModels, analyzeAndFix };

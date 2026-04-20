@@ -8,6 +8,7 @@ const ghTokenSection = document.getElementById('gh-token-section');
 const ghTokenInput = document.getElementById('gh-token-input');
 const ghTokenSave = document.getElementById('gh-token-save');
 const ghStatus = document.getElementById('gh-status');
+const modelSelect = document.getElementById('model-select');
 const toast = document.getElementById('toast');
 const projectTabs = document.getElementById('project-tabs');
 const addProjectBtn = document.getElementById('add-project');
@@ -527,6 +528,27 @@ ghTokenInput.addEventListener('keydown', (e) => {
   if (e.key === 'Enter') ghTokenSave.click();
 });
 
+// ── Model Selector ──
+
+async function initModelSelect() {
+  const models = await window.xmuggle.listModels();
+  const current = await window.xmuggle.getModel();
+  modelSelect.innerHTML = '';
+  for (const m of models) {
+    const opt = document.createElement('option');
+    opt.value = m.id;
+    opt.textContent = m.label;
+    if (m.id === current) opt.selected = true;
+    modelSelect.appendChild(opt);
+  }
+}
+
+modelSelect.addEventListener('change', async () => {
+  await window.xmuggle.setModel(modelSelect.value);
+  const label = modelSelect.options[modelSelect.selectedIndex].textContent;
+  showToast(`Model: ${label}`, false);
+});
+
 // ── Init ──
 
 async function refresh() {
@@ -552,5 +574,6 @@ window.xmuggle.onTaskProgress((imgPath, msg) => {
 });
 initApiKey();
 initGhToken();
+initModelSelect();
 loadProjects();
 refresh();

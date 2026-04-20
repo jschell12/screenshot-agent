@@ -187,6 +187,11 @@ app.whenReady().then(() => {
   ipcMain.handle('has-gh-token', () => api.hasGhToken());
   ipcMain.handle('set-gh-token', (_, token) => { api.setGhToken(token); return true; });
   ipcMain.handle('reset-gh-token', () => { api.resetGhToken(); return true; });
+
+  // Model
+  ipcMain.handle('get-model', () => api.getModel());
+  ipcMain.handle('set-model', (_, modelId) => { api.setModel(modelId); return true; });
+  ipcMain.handle('list-models', () => api.listModels());
   ipcMain.handle('open-external', (_, url) => shell.openExternal(url));
 
   // Send

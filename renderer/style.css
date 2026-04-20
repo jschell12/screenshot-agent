@@ -56,6 +56,21 @@ header h1 {
   cursor: pointer;
 }
 
+#model-select {
+  background: #1a1a2e;
+  border: 1px solid #0f3460;
+  color: #e0e0e0;
+  padding: 4px 8px;
+  border-radius: 4px;
+  font-size: 12px;
+  cursor: pointer;
+}
+
+#model-select:focus {
+  outline: none;
+  border-color: #e94560;
+}
+
 #api-status, #gh-status {
   font-size: 12px;
 }
