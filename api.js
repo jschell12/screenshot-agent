@@ -316,16 +316,30 @@ async function analyzeAndFix({ imagePaths, projectPath, message, onProgress, pri
     
     log('Continuing conversation…');
   } else {
-    // First message — include images + repo context
-    log(`Encoding ${imagePaths.length} image(s)…`);
-    const imageBlocks = imagePaths.map(p => ({
-      type: 'image',
-      source: {
-        type: 'base64',
-        media_type: mediaType(p),
-        data: fs.readFileSync(p).toString('base64'),
-      },
-    }));
+    // First message — include images, text notes, + repo context
+    const textExts = new Set(['.txt', '.md']);
+    const contentBlocks = [];
+    let imageCount = 0;
+    let noteCount = 0;
+    for (const p of imagePaths) {
+      const ext = path.extname(p).toLowerCase();
+      if (textExts.has(ext)) {
+        const body = fs.readFileSync(p, 'utf8');
+        contentBlocks.push({ type: 'text', text: `--- Pasted note (${path.basename(p)}) ---\n${body}\n--- end note ---` });
+        noteCount++;
+      } else {
+        contentBlocks.push({
+          type: 'image',
+          source: {
+            type: 'base64',
+            media_type: mediaType(p),
+            data: fs.readFileSync(p).toString('base64'),
+          },
+        });
+        imageCount++;
+      }
+    }
+    log(`Encoding ${imageCount} image(s), ${noteCount} note(s)…`);
 
     log('Gathering repo context (file list + source files)…');
     const ctx = getRepoContext(cloneDir);
@@ -347,11 +361,11 @@ async function analyzeAndFix({ imagePaths, projectPath, message, onProgress, pri
       contextText += `\nUser context: ${message}\n`;
     }
 
-    contextText += '\nAnalyze the screenshot(s) and fix the issue using the edit_file tool.';
+    contextText += '\nAnalyze the screenshot(s) and/or pasted note(s) and fix the issue using the edit_file tool.';
 
     messages = [{
       role: 'user',
-      content: [...imageBlocks, { type: 'text', text: contextText }],
+      content: [...contentBlocks, { type: 'text', text: contextText }],
     }];
   }
 

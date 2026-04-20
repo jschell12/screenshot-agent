@@ -6,6 +6,7 @@ const relayStatusEl = document.getElementById('relay-status');
 const toast = document.getElementById('toast');
 const projectTabs = document.getElementById('project-tabs');
 const addProjectBtn = document.getElementById('add-project');
+const addNoteBtn = document.getElementById('add-note');
 
 const BADGE_LABELS = {
   new: 'New',
@@ -106,6 +107,51 @@ addProjectBtn.addEventListener('click', async () => {
   }
 });
 
+// ── Paste text note ──
+
+addNoteBtn.addEventListener('click', () => {
+  const existing = document.getElementById('note-modal');
+  if (existing) existing.remove();
+
+  const modal = document.createElement('div');
+  modal.id = 'note-modal';
+  modal.className = 'modal-overlay';
+  modal.innerHTML = `
+    <div class="modal">
+      <div class="modal-title">Paste text</div>
+      <div class="modal-subtitle">Saved as a text note you can send like a screenshot</div>
+      <textarea id="note-text-input" placeholder="Paste error message, stack trace, log, etc\u2026" rows="10"></textarea>
+      <div class="modal-actions">
+        <button id="note-cancel" class="link-btn">Cancel</button>
+        <button id="note-save" class="modal-send-btn">Save</button>
+      </div>
+    </div>
+  `;
+  document.body.appendChild(modal);
+
+  const textInput = document.getElementById('note-text-input');
+  textInput.focus();
+  modal.addEventListener('click', (e) => { if (e.target === modal) modal.remove(); });
+  document.getElementById('note-cancel').addEventListener('click', () => modal.remove());
+
+  const save = async () => {
+    const text = textInput.value.trim();
+    if (!text) return;
+    modal.remove();
+    try {
+      const note = await window.xmuggle.createNote(text);
+      showToast(`Saved ${note.name}`, false);
+      await refresh();
+    } catch (err) {
+      showToast(`Error: ${err.message}`, true);
+    }
+  };
+  document.getElementById('note-save').addEventListener('click', save);
+  textInput.addEventListener('keydown', (e) => {
+    if (e.key === 'Enter' && (e.metaKey || e.ctrlKey)) save();
+  });
+});
+
 // ── Helper function to make links clickable ──
 
 function makeLinksClickable(text) {
@@ -159,13 +205,24 @@ function render(images) {
     const isProcessing = processingSet.has(img.path);
     const isExpanded = expandedCard === img.path;
     const hasConversation = img.conversation && img.conversation.length > 0;
+    const isText = img.type === 'text';
     const card = document.createElement('div');
-    card.className = 'card' + (isProcessing ? ' card-processing' : '') + (isExpanded ? ' card-expanded' : '');
+    card.className = 'card'
+      + (isText ? ' card-text' : '')
+      + (isProcessing ? ' card-processing' : '')
+      + (isExpanded ? ' card-expanded' : '');
 
-    const imgEl = document.createElement('img');
-    imgEl.src = `file://${img.path}`;
-    imgEl.loading = 'lazy';
-    card.appendChild(imgEl);
+    if (isText) {
+      const textEl = document.createElement('div');
+      textEl.className = 'text-preview';
+      textEl.textContent = img.preview || '';
+      card.appendChild(textEl);
+    } else {
+      const imgEl = document.createElement('img');
+      imgEl.src = `file://${img.path}`;
+      imgEl.loading = 'lazy';
+      card.appendChild(imgEl);
+    }
 
     const status = isProcessing ? 'processing' : img.status;
     const badge = document.createElement('span');
@@ -330,6 +387,10 @@ function promptAndSend(img) {
       <select id="project-select">${projectOptions}</select>
       <label class="modal-label">Context</label>
       <textarea id="context-input" placeholder="What's wrong? What should be fixed?" rows="3"></textarea>
+      <label class="modal-checkbox-row">
+        <input type="checkbox" id="analyze-checkbox" checked>
+        <span>Analyze with AI</span>
+      </label>
       <div class="modal-actions">
         <button id="modal-cancel" class="link-btn">Cancel</button>
         <button id="modal-relay" class="link-btn" style="display:none;">Relay</button>
@@ -341,6 +402,7 @@ function promptAndSend(img) {
 
   const contextInput = document.getElementById('context-input');
   const projectSelect = document.getElementById('project-select');
+  const analyzeCheckbox = document.getElementById('analyze-checkbox');
   projectSelect.focus();
 
   document.getElementById('modal-cancel').addEventListener('click', () => modal.remove());
@@ -365,8 +427,9 @@ function promptAndSend(img) {
     const projectPath = projectSelect.value;
     if (!projectPath) return;
     const message = contextInput.value.trim();
+    const analyze = analyzeCheckbox.checked;
     modal.remove();
-    sendImage(img, projectPath, message);
+    sendImage(img, projectPath, message, analyze);
   };
 
   document.getElementById('modal-send').addEventListener('click', doSend);
@@ -375,27 +438,29 @@ function promptAndSend(img) {
   });
 }
 
-async function sendImage(img, projectPath, message) {
-  processingSet.add(img.path);
-  progressLogs[img.path] = [];
-  expandedCard = img.path;
+async function sendImage(img, projectPath, message, analyze = true) {
+  if (analyze) {
+    processingSet.add(img.path);
+    progressLogs[img.path] = [];
+    expandedCard = img.path;
+  }
   const images = await window.xmuggle.getImages();
   render(images);
 
   try {
-    const result = await window.xmuggle.sendToApi([img.path], projectPath, message || '');
+    const result = await window.xmuggle.sendToApi([img.path], projectPath, message || '', { analyze });
     processingSet.delete(img.path);
 
     if (result.status === 'success') {
       const prInfo = result.prUrl ? ` PR: ${result.prUrl}` : '';
       showToast(`Fixed: ${result.summary}${prInfo}`, false);
-      
+
       // Add the success message to the conversation
       if (result.prUrl) {
         const successMessage = `Fixed: ${result.summary} PR: ${result.prUrl}`;
         await addToConversation(img.path, 'assistant', successMessage);
       }
-    } else if (result.status === 'no_changes') {
+    } else if (result.status === 'no_changes' || result.status === 'saved') {
       showToast(result.summary, false);
     } else {
       showToast(`Error: ${result.summary}`, true);

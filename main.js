@@ -10,10 +10,13 @@ const XMUGGLE_DIR = path.join(os.homedir(), '.xmuggle');
 const PROJECTS_FILE = path.join(XMUGGLE_DIR, 'projects.json');
 const TASKS_FILE = path.join(XMUGGLE_DIR, 'tasks.json');
 const INBOX_DIR = path.join(XMUGGLE_DIR, 'inbox');
+const NOTES_DIR = path.join(XMUGGLE_DIR, 'notes');
 const SYNC_REPO_FILE = path.join(XMUGGLE_DIR, 'sync-repo');
 const SYNC_DIR = path.join(XMUGGLE_DIR, 'sync');
 const SERVER_PORT = 24816;
 const IMAGE_EXTS = new Set(['.png', '.jpg', '.jpeg', '.webp', '.gif']);
+const TEXT_EXTS = new Set(['.txt', '.md']);
+const TEXT_PREVIEW_CHARS = 400;
 
 // ── Projects ──
 
@@ -90,16 +93,27 @@ function syncTaskStatuses() {
   return tasks;
 }
 
-// ── Images ──
+// ── Items (images + text notes) ──
 
-function scanDir(dir, tasks) {
-  const images = [];
+function readTextPreview(full) {
+  try {
+    const raw = fs.readFileSync(full, 'utf8');
+    return raw.length > TEXT_PREVIEW_CHARS ? raw.slice(0, TEXT_PREVIEW_CHARS) + '\u2026' : raw;
+  } catch {
+    return '';
+  }
+}
+
+function scanDir(dir, tasks, { allowText = false } = {}) {
+  const items = [];
   try {
     const entries = fs.readdirSync(dir);
     for (const name of entries) {
       if (name.startsWith('.')) continue;
       const ext = path.extname(name).toLowerCase();
-      if (!IMAGE_EXTS.has(ext)) continue;
+      const isImage = IMAGE_EXTS.has(ext);
+      const isText = allowText && TEXT_EXTS.has(ext);
+      if (!isImage && !isText) continue;
       const full = path.join(dir, name);
       try {
         const stat = fs.statSync(full);
@@ -107,18 +121,36 @@ function scanDir(dir, tasks) {
         const status = task ? task.status : 'new';
         const projectPath = task ? task.projectPath : '';
         const conversation = task ? (task.conversation || []) : [];
-        images.push({ path: full, name, mtime: stat.mtimeMs, status, projectPath, conversation });
+        const base = { path: full, name, mtime: stat.mtimeMs, status, projectPath, conversation };
+        if (isImage) {
+          items.push({ ...base, type: 'image' });
+        } else {
+          items.push({ ...base, type: 'text', preview: readTextPreview(full) });
+        }
       } catch {}
     }
   } catch {}
-  return images;
+  return items;
 }
 
 function getDesktopImages() {
   const tasks = syncTaskStatuses();
-  const images = [...scanDir(DESKTOP, tasks), ...scanDir(INBOX_DIR, tasks)];
-  images.sort((a, b) => b.mtime - a.mtime);
-  return images;
+  const items = [
+    ...scanDir(DESKTOP, tasks),
+    ...scanDir(INBOX_DIR, tasks, { allowText: true }),
+    ...scanDir(NOTES_DIR, tasks, { allowText: true }),
+  ];
+  items.sort((a, b) => b.mtime - a.mtime);
+  return items;
+}
+
+function createNote(text) {
+  fs.mkdirSync(NOTES_DIR, { recursive: true });
+  const id = Date.now().toString(36) + Math.random().toString(36).slice(2, 6);
+  const name = `note-${id}.txt`;
+  const full = path.join(NOTES_DIR, name);
+  fs.writeFileSync(full, text);
+  return { path: full, name };
 }
 
 // ── Git Sync ──
@@ -388,11 +420,25 @@ app.whenReady().then(() => {
     return imported;
   });
 
+  // Create a pasted-text note item.
+  ipcMain.handle('create-note', (_, text) => {
+    if (!text || !text.trim()) throw new Error('Empty note');
+    return createNote(text);
+  });
+
   // Send
-  ipcMain.handle('send-to-api', async (event, imagePaths, projectPath, message) => {
+  ipcMain.handle('send-to-api', async (event, imagePaths, projectPath, message, opts) => {
     const imgPath = imagePaths[0];
+    const analyze = !opts || opts.analyze !== false; // default true
     const taskId = Date.now().toString(36) + Math.random().toString(36).slice(2, 6);
     const win = BrowserWindow.fromWebContents(event.sender);
+
+    if (!analyze) {
+      // Just record the task with the user's message; don't call Claude.
+      const conversation = message ? [{ role: 'user', text: message }] : [];
+      updateTaskStatus(imgPath, projectPath, taskId, 'pending', '', conversation);
+      return { status: 'saved', summary: 'Saved without AI analysis.' };
+    }
 
     // Mark as processing
     updateTaskStatus(imgPath, projectPath, taskId, 'processing');
@@ -453,10 +499,16 @@ app.whenReady().then(() => {
 
   // ── Relay server: receive images from remote xmuggle instances ──
   fs.mkdirSync(INBOX_DIR, { recursive: true });
+  fs.mkdirSync(NOTES_DIR, { recursive: true });
 
-  // Watch inbox for new images
+  // Watch inbox + notes for new items
   try {
     fs.watch(INBOX_DIR, () => {
+      try { win.webContents.send('images-updated', getDesktopImages()); } catch {}
+    });
+  } catch {}
+  try {
+    fs.watch(NOTES_DIR, () => {
       try { win.webContents.send('images-updated', getDesktopImages()); } catch {}
     });
   } catch {}
