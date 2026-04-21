@@ -323,7 +323,7 @@ function promptAndSend(img) {
 
     const relayHost = relaySelect.value;
     if (relayHost === '_git') {
-      gitPush(img, projectPath, message);
+      queuePush(img, projectPath, message);
     } else if (relayHost && relayHost !== '_scan' && relayHost !== '') {
       relayImage(img, projectPath, message);
     } else {
@@ -348,18 +348,26 @@ async function saveItem(img, projectPath, message) {
   render(updated);
 }
 
-async function gitPush(img, projectPath, message) {
+async function queuePush(img, projectPath, message) {
+  // Ensure queue URL is configured
+  let queueUrl = await window.xmuggle.getQueueUrl();
+  if (!queueUrl) {
+    const url = prompt('Enter queue repo URL (e.g. git@github.com:user/xmuggle-queue.git):');
+    if (!url) return;
+    await window.xmuggle.setQueueUrl(url);
+  }
+
   processingSet.add(img.path);
   const images = await window.xmuggle.getImages();
   render(images);
 
   try {
-    const result = await window.xmuggle.gitProjectPush([img.path], projectPath, message || '');
+    const result = await window.xmuggle.queuePush([img.path], projectPath, message || '');
     processingSet.delete(img.path);
-    showToast('Pushed to ' + projectPath.split('/').pop(), false);
+    showToast('Queued for ' + (result.project || projectPath.split('/').pop()), false);
   } catch (err) {
     processingSet.delete(img.path);
-    showToast('Git push error: ' + err.message, true);
+    showToast('Queue error: ' + err.message, true);
   }
 
   const updated = await window.xmuggle.getImages();

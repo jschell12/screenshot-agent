@@ -11,7 +11,8 @@ const PROJECTS_FILE = path.join(XMUGGLE_DIR, 'projects.json');
 const TASKS_FILE = path.join(XMUGGLE_DIR, 'tasks.json');
 const INBOX_DIR = path.join(XMUGGLE_DIR, 'inbox');
 const NOTES_DIR = path.join(XMUGGLE_DIR, 'notes');
-const WORK_DIR = path.join(XMUGGLE_DIR, 'work');
+const QUEUE_REPO_DIR = path.join(XMUGGLE_DIR, 'queue-repo');
+const QUEUE_CONF_FILE = path.join(XMUGGLE_DIR, 'queue-url');
 const SERVER_PORT = 24816;
 const IMAGE_EXTS = new Set(['.png', '.jpg', '.jpeg', '.webp', '.gif']);
 const TEXT_EXTS = new Set(['.txt', '.md']);
@@ -152,61 +153,84 @@ function createNote(text) {
   return { path: full, name };
 }
 
-// ── Git Sync (per-project) ──
+// ── Queue repo sync ──
 
-function getProjectRemote(projectPath) {
+function getQueueUrl() {
+  try { return fs.readFileSync(QUEUE_CONF_FILE, 'utf8').trim(); } catch { return ''; }
+}
+
+function setQueueUrl(url) {
+  fs.mkdirSync(XMUGGLE_DIR, { recursive: true });
+  fs.writeFileSync(QUEUE_CONF_FILE, url.trim() + '\n');
+}
+
+function ensureQueueClone() {
+  const url = getQueueUrl();
+  if (!url) return null;
+
+  const api = require('./api');
+  const env = api.gitEnv();
+
+  if (!fs.existsSync(path.join(QUEUE_REPO_DIR, '.git'))) {
+    fs.mkdirSync(QUEUE_REPO_DIR, { recursive: true });
+    try {
+      execSync(`git clone "${url}" "${QUEUE_REPO_DIR}"`, { stdio: 'pipe', env });
+    } catch (e) {
+      console.error('Queue clone failed:', e.message);
+      return null;
+    }
+  } else {
+    try {
+      execSync('git pull --ff-only', { cwd: QUEUE_REPO_DIR, stdio: 'pipe', env });
+    } catch {}
+  }
+  return QUEUE_REPO_DIR;
+}
+
+function getProjectSlug(projectPath) {
+  // Get "user/repo" from git remote, fall back to dir name
   try {
-    return execSync('git remote get-url origin', { cwd: projectPath, encoding: 'utf8', stdio: 'pipe' }).trim();
+    const remote = execSync('git remote get-url origin', { cwd: projectPath, encoding: 'utf8', stdio: 'pipe' }).trim();
+    return remote.replace(/^https:\/\/github\.com\//, '').replace(/^git@github\.com:/, '').replace(/\.git$/, '');
   } catch {
-    return null;
+    return path.basename(projectPath);
   }
 }
 
-function gitProjectPush(imagePaths, projectPath, message) {
-  const remoteUrl = getProjectRemote(projectPath);
-  if (!remoteUrl) throw new Error(`No git remote for ${projectPath}`);
+function queuePush(imagePaths, projectPath, message) {
+  const queueDir = ensureQueueClone();
+  if (!queueDir) throw new Error('No queue repo configured. Set it in the relay dropdown.');
 
   const api = require('./api');
   const env = api.gitEnv();
   const crypto = require('crypto');
-  const id = crypto.randomBytes(4).toString('hex');
-  const slug = path.basename(projectPath);
-  const cloneDir = path.join(WORK_DIR, `${slug}-${id}`);
-
-  fs.mkdirSync(WORK_DIR, { recursive: true });
-
-  // Clone the project repo
-  execSync(`git clone --depth 1 "${remoteUrl}" "${cloneDir}"`, { stdio: 'pipe', env });
-
-  // Copy images into .xmuggle/inbox/
-  const inboxDir = path.join(cloneDir, '.xmuggle', 'inbox');
-  fs.mkdirSync(inboxDir, { recursive: true });
+  const id = Date.now().toString(36) + '-' + crypto.randomBytes(3).toString('hex');
+  const taskDir = path.join(queueDir, 'pending', id);
+  fs.mkdirSync(taskDir, { recursive: true });
 
   const filenames = [];
   for (const imgPath of imagePaths) {
     const filename = path.basename(imgPath);
-    fs.copyFileSync(imgPath, path.join(inboxDir, filename));
+    fs.copyFileSync(imgPath, path.join(taskDir, filename));
     filenames.push(filename);
   }
 
-  // Write metadata
-  fs.writeFileSync(path.join(inboxDir, 'meta.json'), JSON.stringify({
+  const project = getProjectSlug(projectPath);
+
+  fs.writeFileSync(path.join(taskDir, 'meta.json'), JSON.stringify({
     filenames,
+    project,
     message: message || '',
     from: os.hostname(),
     timestamp: new Date().toISOString(),
   }, null, 2) + '\n');
 
-  // Commit and push
-  execSync('git add -A', { cwd: cloneDir, stdio: 'pipe' });
-  const commitMsg = `xmuggle: ${filenames.join(', ')}`;
-  execSync(`git commit -m "${commitMsg.replace(/"/g, '\\"')}"`, { cwd: cloneDir, stdio: 'pipe' });
-  execSync('git push origin', { cwd: cloneDir, stdio: 'pipe', env });
+  execSync('git add -A', { cwd: queueDir, stdio: 'pipe' });
+  const commitMsg = `xmuggle: ${project} — ${filenames.join(', ')}`;
+  execSync(`git commit -m "${commitMsg.replace(/"/g, '\\"')}"`, { cwd: queueDir, stdio: 'pipe' });
+  execSync('git push', { cwd: queueDir, stdio: 'pipe', env });
 
-  // Clean up clone
-  fs.rmSync(cloneDir, { recursive: true, force: true });
-
-  return { status: 'synced', filenames };
+  return { status: 'queued', id, project };
 }
 
 // ── Window ──
@@ -341,9 +365,11 @@ app.whenReady().then(() => {
     return await resp.json();
   });
 
-  // Git sync (per-project)
-  ipcMain.handle('git-project-push', (_, imagePaths, projectPath, message) => {
-    return gitProjectPush(imagePaths, projectPath, message);
+  // Queue repo
+  ipcMain.handle('get-queue-url', () => getQueueUrl());
+  ipcMain.handle('set-queue-url', (_, url) => { setQueueUrl(url); return true; });
+  ipcMain.handle('queue-push', (_, imagePaths, projectPath, message) => {
+    return queuePush(imagePaths, projectPath, message);
   });
 
   // Create a pasted-text note item.
