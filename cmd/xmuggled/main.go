@@ -327,6 +327,7 @@ func processQueue(cfg Config) {
 		runGit(queueDir, "add", "-A")
 		queueMsg := fmt.Sprintf("done: %s", entry.Name())
 		if _, err := runGit(queueDir, "commit", "-m", queueMsg); err == nil {
+			runGit(queueDir, "pull", "--rebase")
 			logf("  Pushing queue update")
 			if out, err := runGit(queueDir, "push"); err != nil {
 				logf("  Queue push failed: %s", out)
