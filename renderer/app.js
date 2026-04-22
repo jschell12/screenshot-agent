@@ -46,7 +46,7 @@ function makeLinksClickable(text) {
   const container = document.createElement('span');
 
   parts.forEach(part => {
-    if (urlRegex.test(part)) {
+    if (/^https?:\/\/[^\s]+$/.test(part)) {
       const link = document.createElement('a');
       link.href = part;
       link.textContent = part;
@@ -251,7 +251,7 @@ function render(images) {
   const inProgress = filtered.filter(i => i.status === 'processing' || processingSet.has(i.path)).length;
   const done = filtered.filter(i => i.status === 'done').length;
   const label = activeProject ? activeProject.split('/').pop() : 'all projects';
-  count.textContent = `${total} images \u2022 ${pending} new \u2022 ${inProgress} in progress \u2022 ${done} done \u2022 ${label}`;
+  count.textContent = `${total} items \u2022 ${pending} new \u2022 ${inProgress} in progress \u2022 ${done} done \u2022 ${label}`;
 
   for (const img of filtered) {
     const isProcessing = processingSet.has(img.path);
