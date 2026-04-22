@@ -22,7 +22,11 @@ const TEXT_PREVIEW_CHARS = 400;
 // ── Projects ──
 
 function loadProjects() {
-  try { return JSON.parse(fs.readFileSync(PROJECTS_FILE, 'utf8')); } catch { return []; }
+  try {
+    const data = JSON.parse(fs.readFileSync(PROJECTS_FILE, 'utf8'));
+    // Migrate legacy string entries to objects
+    return data.map(p => typeof p === 'string' ? { path: p, gitUrl: '' } : p);
+  } catch { return []; }
 }
 
 function saveProjects(list) {
@@ -30,24 +34,37 @@ function saveProjects(list) {
   fs.writeFileSync(PROJECTS_FILE, JSON.stringify(list, null, 2) + '\n');
 }
 
-function addProject(dirPath) {
+function addProject(dirPath, gitUrl) {
   const abs = path.resolve(dirPath);
   if (!fs.existsSync(path.join(abs, '.git'))) return { error: 'Not a git repo' };
-  const projects = loadProjects();
-  if (!projects.includes(abs)) {
-    projects.push(abs);
-    saveProjects(projects);
+
+  // Auto-detect git remote if not provided
+  if (!gitUrl) {
+    try {
+      gitUrl = execSync('git remote get-url origin', { cwd: abs, encoding: 'utf8', stdio: 'pipe' }).trim();
+    } catch {
+      gitUrl = '';
+    }
   }
-  return { path: abs, name: path.basename(abs) };
+
+  const projects = loadProjects();
+  const existing = projects.find(p => p.path === abs);
+  if (existing) {
+    existing.gitUrl = gitUrl || existing.gitUrl;
+  } else {
+    projects.push({ path: abs, gitUrl });
+  }
+  saveProjects(projects);
+  return { path: abs, name: path.basename(abs), gitUrl };
 }
 
 function removeProject(dirPath) {
-  const projects = loadProjects().filter(p => p !== dirPath);
+  const projects = loadProjects().filter(p => p.path !== dirPath);
   saveProjects(projects);
 }
 
 function listProjects() {
-  return loadProjects().map(p => ({ path: p, name: path.basename(p) }));
+  return loadProjects().map(p => ({ path: p.path, name: path.basename(p.path), gitUrl: p.gitUrl || '' }));
 }
 
 // ── Tasks ──
@@ -302,10 +319,13 @@ app.whenReady().then(() => {
 
   // Projects
   ipcMain.handle('list-projects', () => listProjects());
-  ipcMain.handle('add-project', async () => {
+  ipcMain.handle('add-project', async (_, gitUrl, dirPath) => {
+    if (dirPath) {
+      return addProject(dirPath, gitUrl);
+    }
     const result = await dialog.showOpenDialog({ properties: ['openDirectory'] });
     if (result.canceled || !result.filePaths.length) return null;
-    return addProject(result.filePaths[0]);
+    return addProject(result.filePaths[0], gitUrl);
   });
   ipcMain.handle('remove-project', (_, dirPath) => {
     removeProject(dirPath);

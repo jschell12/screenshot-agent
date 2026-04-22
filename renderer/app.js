@@ -119,14 +119,73 @@ function renderProjectTabs() {
   }
 }
 
-addProjectBtn.addEventListener('click', async () => {
-  const result = await window.xmuggle.addProject();
-  if (result && !result.error) {
-    await loadProjects();
-    showToast(`Added project: ${result.name}`, false);
-  } else if (result && result.error) {
-    showToast(result.error, true);
-  }
+addProjectBtn.addEventListener('click', () => {
+  const existing = document.getElementById('add-project-modal');
+  if (existing) existing.remove();
+
+  const modal = document.createElement('div');
+  modal.id = 'add-project-modal';
+  modal.className = 'modal-overlay';
+  modal.innerHTML = `
+    <div class="modal">
+      <div class="modal-title">Add Project</div>
+      <div class="settings-field">
+        <label>Git URL</label>
+        <input type="text" id="add-project-git-url" placeholder="git@github.com:user/repo.git (auto-detected if blank)">
+        <div class="settings-hint">Leave blank to auto-detect from the selected directory</div>
+      </div>
+      <div class="settings-field">
+        <label>Local Path</label>
+        <div style="display:flex;gap:8px;align-items:center;">
+          <input type="text" id="add-project-path" placeholder="Select a directory..." readonly style="flex:1;cursor:pointer;">
+          <button id="add-project-browse" class="link-btn">Browse</button>
+        </div>
+      </div>
+      <div class="modal-actions">
+        <button id="add-project-cancel" class="link-btn">Cancel</button>
+        <button id="add-project-save" class="modal-send-btn">Add</button>
+      </div>
+    </div>
+  `;
+  document.body.appendChild(modal);
+
+  modal.addEventListener('click', (e) => { if (e.target === modal) modal.remove(); });
+  document.getElementById('add-project-cancel').addEventListener('click', () => modal.remove());
+
+  document.getElementById('add-project-browse').addEventListener('click', async () => {
+    // Use the old addProject() with no args to trigger directory picker
+    const result = await window.xmuggle.addProject();
+    if (result && !result.error) {
+      document.getElementById('add-project-path').value = result.path;
+      if (result.gitUrl) {
+        document.getElementById('add-project-git-url').value = result.gitUrl;
+      }
+      // Already added via the picker, close modal
+      modal.remove();
+      await loadProjects();
+      showToast(`Added project: ${result.name}`, false);
+    } else if (result && result.error) {
+      showToast(result.error, true);
+    }
+  });
+
+  document.getElementById('add-project-save').addEventListener('click', async () => {
+    const gitUrl = document.getElementById('add-project-git-url').value.trim();
+    const dirPath = document.getElementById('add-project-path').value.trim();
+    if (!dirPath) {
+      // Trigger directory picker if no path entered
+      document.getElementById('add-project-browse').click();
+      return;
+    }
+    modal.remove();
+    const result = await window.xmuggle.addProject(gitUrl, dirPath);
+    if (result && !result.error) {
+      await loadProjects();
+      showToast(`Added project: ${result.name}`, false);
+    } else if (result && result.error) {
+      showToast(result.error, true);
+    }
+  });
 });
 
 // ── Paste text note ──
