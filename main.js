@@ -14,6 +14,7 @@ const NOTES_DIR = path.join(XMUGGLE_DIR, 'notes');
 const QUEUE_REPO_DIR = path.join(XMUGGLE_DIR, 'queue-repo');
 const QUEUE_CONF_FILE = path.join(XMUGGLE_DIR, 'queue-url');
 const SERVER_PORT = 24816;
+let relayServer = null;
 const IMAGE_EXTS = new Set(['.png', '.jpg', '.jpeg', '.webp', '.gif']);
 const TEXT_EXTS = new Set(['.txt', '.md']);
 const TEXT_PREVIEW_CHARS = 400;
@@ -404,7 +405,7 @@ app.whenReady().then(() => {
     });
   } catch {}
 
-  const server = http.createServer((req, res) => {
+  relayServer = http.createServer((req, res) => {
     // CORS
     res.setHeader('Access-Control-Allow-Origin', '*');
     res.setHeader('Access-Control-Allow-Methods', 'POST, GET, OPTIONS');
@@ -463,10 +464,21 @@ app.whenReady().then(() => {
     res.end('Not found');
   });
 
-  server.listen(SERVER_PORT, '0.0.0.0', () => {
+  relayServer.on('error', (err) => {
+    if (err.code === 'EADDRINUSE') {
+      console.error(`Port ${SERVER_PORT} already in use — relay server disabled`);
+    } else {
+      console.error('Relay server error:', err.message);
+    }
+  });
+
+  relayServer.listen(SERVER_PORT, '0.0.0.0', () => {
     console.log(`xmuggle relay server listening on port ${SERVER_PORT}`);
   });
 
 });
 
-app.on('window-all-closed', () => app.quit());
+app.on('window-all-closed', () => {
+  if (relayServer) relayServer.close();
+  app.quit();
+});
