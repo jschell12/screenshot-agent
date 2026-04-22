@@ -6,6 +6,7 @@ const toast = document.getElementById('toast');
 const projectTabs = document.getElementById('project-tabs');
 const addProjectBtn = document.getElementById('add-project');
 const addNoteBtn = document.getElementById('add-note');
+const settingsBtn = document.getElementById('settings-btn');
 
 const BADGE_LABELS = {
   new: 'New',
@@ -170,6 +171,68 @@ addNoteBtn.addEventListener('click', () => {
   document.getElementById('note-save').addEventListener('click', save);
   textInput.addEventListener('keydown', (e) => {
     if (e.key === 'Enter' && (e.metaKey || e.ctrlKey)) save();
+  });
+});
+
+// ── Settings Modal ──
+
+settingsBtn.addEventListener('click', async () => {
+  const existing = document.getElementById('settings-modal');
+  if (existing) { existing.remove(); return; }
+
+  const queueUrl = await window.xmuggle.getQueueUrl();
+  const hasToken = await window.xmuggle.hasGhToken();
+
+  const modal = document.createElement('div');
+  modal.id = 'settings-modal';
+  modal.className = 'modal-overlay';
+  modal.innerHTML = `
+    <div class="modal">
+      <div class="modal-title">Settings</div>
+      <div class="settings-field">
+        <label>Queue Repo URL</label>
+        <input type="text" id="settings-queue-url" value="${queueUrl || ''}" placeholder="git@github.com:user/xmuggle-queue.git">
+        <div class="settings-hint">Git repo for syncing screenshots between machines</div>
+      </div>
+      <div class="settings-field">
+        <label>GitHub Token ${hasToken ? '(set)' : '(not set)'}</label>
+        <input type="password" id="settings-gh-token" value="" placeholder="${hasToken ? 'Leave blank to keep current' : 'ghp_...'}">
+        <div class="settings-hint">Used for git push auth. Leave blank to keep current value.</div>
+      </div>
+      <div class="modal-actions">
+        <button id="settings-cancel" class="link-btn">Cancel</button>
+        ${hasToken ? '<button id="settings-reset-token" class="link-btn" style="color:#d63031;">Reset Token</button>' : ''}
+        <button id="settings-save" class="modal-send-btn">Save</button>
+      </div>
+    </div>
+  `;
+  document.body.appendChild(modal);
+
+  modal.addEventListener('click', (e) => { if (e.target === modal) modal.remove(); });
+  document.getElementById('settings-cancel').addEventListener('click', () => modal.remove());
+
+  const resetBtn = document.getElementById('settings-reset-token');
+  if (resetBtn) {
+    resetBtn.addEventListener('click', async () => {
+      await window.xmuggle.resetGhToken();
+      modal.remove();
+      showToast('GitHub token cleared', false);
+    });
+  }
+
+  document.getElementById('settings-save').addEventListener('click', async () => {
+    const newQueue = document.getElementById('settings-queue-url').value.trim();
+    const newToken = document.getElementById('settings-gh-token').value.trim();
+
+    if (newQueue !== (queueUrl || '')) {
+      await window.xmuggle.setQueueUrl(newQueue);
+    }
+    if (newToken) {
+      await window.xmuggle.setGhToken(newToken);
+    }
+
+    modal.remove();
+    showToast('Settings saved', false);
   });
 });
 
@@ -350,11 +413,10 @@ async function saveItem(img, projectPath, message) {
 
 async function queuePush(img, projectPath, message) {
   // Ensure queue URL is configured
-  let queueUrl = await window.xmuggle.getQueueUrl();
+  const queueUrl = await window.xmuggle.getQueueUrl();
   if (!queueUrl) {
-    const url = prompt('Enter queue repo URL (e.g. git@github.com:user/xmuggle-queue.git):');
-    if (!url) return;
-    await window.xmuggle.setQueueUrl(url);
+    showToast('Set queue repo URL in Settings first', true);
+    return;
   }
 
   processingSet.add(img.path);
