@@ -180,7 +180,7 @@ func ensureQueueClone(cfg Config) bool {
 			return false
 		}
 	} else {
-		if out, err := runGit(queueDir, "pull", "--ff-only"); err != nil {
+		if out, err := runGit(queueDir, "pull", "--rebase"); err != nil {
 			logf("Queue pull failed: %s", out)
 			return false
 		}
@@ -291,7 +291,7 @@ func processQueue(cfg Config) {
 		)
 
 		logf("  Spawning claude in %s", filepath.Base(repoPath))
-		cmd := exec.Command("claude", "--yes", "--print", prompt)
+		cmd := exec.Command("claude", "--print", "--dangerously-skip-permissions", prompt)
 		cmd.Dir = repoPath
 		cmd.Env = gitEnv()
 		output, err := cmd.CombinedOutput()
