@@ -19,8 +19,8 @@ var (
 	configFile = filepath.Join(xmuggleDir, "daemon.json")
 	pidFile    = filepath.Join(xmuggleDir, "daemon.pid")
 	logFile    = filepath.Join(xmuggleDir, "daemon.log")
-	queueDir   = filepath.Join(xmuggleDir, "queue-repo")
-	aqScripts  = filepath.Join(homeDir(), "development", "github.com", "jschell12", "agent-queue", "scripts")
+	queueDir = filepath.Join(xmuggleDir, "queue-repo")
+	workDir  = filepath.Join(xmuggleDir, "work")
 )
 
 type RepoConfig struct {
@@ -143,6 +143,14 @@ func runGit(dir string, args ...string) (string, error) {
 	return strings.TrimSpace(string(out)), err
 }
 
+func getRemoteURL(dir string) string {
+	out, err := runGit(dir, "remote", "get-url", "origin")
+	if err != nil {
+		return ""
+	}
+	return out
+}
+
 func gitSync(dir string) (string, error) {
 	if out, err := runGit(dir, "fetch", "origin"); err != nil {
 		return out, err
@@ -159,9 +167,6 @@ func runShell(command, dir string) (string, error) {
 	out, err := cmd.CombinedOutput()
 	return strings.TrimSpace(string(out)), err
 }
-
-// Track repos currently being processed to skip pulling them
-var processingRepos = map[string]bool{}
 
 // ── Queue message schema ──
 //
@@ -313,10 +318,35 @@ func processQueue(cfg Config) {
 		writeTaskMeta(metaFile, m)
 		queueCommitPush(fmt.Sprintf("processing: %s", taskID))
 
-		// Pull latest for the target repo
-		if out, err := gitSync(repoPath); err != nil {
-			logf("  Pull failed for %s: %s", repoPath, out)
+		// Get remote URL to clone from
+		remoteURL := getRemoteURL(repoPath)
+		if remoteURL == "" {
+			logf("  No git remote for %s", repoPath)
+			m.Status = "error"
+			m.Result = "No git remote URL found"
+			m.DoneAt = time.Now().Format(time.RFC3339)
+			writeTaskMeta(metaFile, m)
+			queueCommitPush(fmt.Sprintf("error: %s — no remote", taskID))
+			continue
 		}
+
+		// Clone to temp dir
+		_ = os.MkdirAll(workDir, 0755)
+		cloneDir := filepath.Join(workDir, fmt.Sprintf("%s-%s", filepath.Base(repoPath), taskID))
+		logf("  Cloning %s to %s", filepath.Base(repoPath), filepath.Base(cloneDir))
+		if out, err := runGit("", "clone", "--depth", "1", remoteURL, cloneDir); err != nil {
+			logf("  Clone failed: %s", out)
+			m.Status = "error"
+			m.Result = fmt.Sprintf("Clone failed: %s", out)
+			m.DoneAt = time.Now().Format(time.RFC3339)
+			writeTaskMeta(metaFile, m)
+			queueCommitPush(fmt.Sprintf("error: %s — clone failed", taskID))
+			continue
+		}
+
+		// Create branch
+		branch := fmt.Sprintf("xmuggle-fix-%s", taskID)
+		runGit(cloneDir, "checkout", "-b", branch)
 
 		// Collect image paths
 		var imgPaths []string
@@ -329,6 +359,7 @@ func processQueue(cfg Config) {
 
 		if len(imgPaths) == 0 {
 			logf("  No images found in task %s", taskID)
+			os.RemoveAll(cloneDir)
 			m.Status = "error"
 			m.Result = "No images found in task"
 			m.DoneAt = time.Now().Format(time.RFC3339)
@@ -343,18 +374,17 @@ func processQueue(cfg Config) {
 			strings.Join(imgPaths, ", "), m.Message,
 		)
 
-		// Spawn claude (mark repo as busy so syncRepos skips it)
-		processingRepos[repoPath] = true
-		logf("  Spawning claude in %s", filepath.Base(repoPath))
+		// Spawn claude in the temp clone
+		logf("  Spawning claude on branch %s", branch)
 		cmd := exec.Command("claude", "--print", "--dangerously-skip-permissions", prompt)
-		cmd.Dir = repoPath
+		cmd.Dir = cloneDir
 		cmd.Env = gitEnv()
 		output, err := cmd.CombinedOutput()
 		result := strings.TrimSpace(string(output))
 
 		if err != nil {
-			delete(processingRepos, repoPath)
 			logf("  Claude failed: %v\n%s", err, result)
+			os.RemoveAll(cloneDir)
 			m.Status = "error"
 			m.Result = fmt.Sprintf("Claude failed: %v", err)
 			m.DoneAt = time.Now().Format(time.RFC3339)
@@ -365,19 +395,79 @@ func processQueue(cfg Config) {
 
 		logf("  Claude finished")
 
-		// Commit and push code changes to the project repo
-		if status, _ := runGit(repoPath, "status", "--porcelain"); status != "" {
-			runGit(repoPath, "add", "-A")
-			commitMsg := fmt.Sprintf("xmuggle: fix from task %s", taskID)
-			if _, err := runGit(repoPath, "commit", "-m", commitMsg); err == nil {
-				logf("  Pushing code changes to %s", filepath.Base(repoPath))
-				if out, err := runGit(repoPath, "push"); err != nil {
-					logf("  Push failed: %s", out)
-				}
+		// Check if claude made changes
+		porcelain, _ := runGit(cloneDir, "status", "--porcelain")
+		if porcelain == "" {
+			logf("  No changes made")
+			os.RemoveAll(cloneDir)
+			m.Status = "done"
+			m.Result = result
+			m.DoneAt = time.Now().Format(time.RFC3339)
+			writeTaskMeta(metaFile, m)
+			queueCommitPush(fmt.Sprintf("done: %s — no changes", taskID))
+			logf("  Task %s complete (no changes)", taskID)
+			continue
+		}
+
+		// Commit, push branch, create PR, merge, clean up
+		runGit(cloneDir, "add", "-A")
+		commitMsg := fmt.Sprintf("xmuggle: fix from task %s", taskID)
+		runGit(cloneDir, "commit", "-m", commitMsg)
+
+		// Unshallow so we can push the branch
+		runGit(cloneDir, "fetch", "--unshallow")
+
+		logf("  Pushing branch %s", branch)
+		if out, err := runGit(cloneDir, "push", "origin", branch); err != nil {
+			logf("  Push branch failed: %s", out)
+			os.RemoveAll(cloneDir)
+			m.Status = "error"
+			m.Result = fmt.Sprintf("Push failed: %s", out)
+			m.DoneAt = time.Now().Format(time.RFC3339)
+			writeTaskMeta(metaFile, m)
+			queueCommitPush(fmt.Sprintf("error: %s — push failed", taskID))
+			continue
+		}
+
+		// Create and merge PR via gh CLI
+		logf("  Creating PR")
+		prCmd := exec.Command("gh", "pr", "create",
+			"--title", commitMsg,
+			"--body", fmt.Sprintf("Automated fix from xmuggle task %s\n\n%s", taskID, m.Message),
+			"--head", branch,
+			"--base", "main",
+		)
+		prCmd.Dir = cloneDir
+		prCmd.Env = gitEnv()
+		prOut, prErr := prCmd.CombinedOutput()
+		prURL := strings.TrimSpace(string(prOut))
+
+		if prErr != nil {
+			logf("  PR create failed: %s", prURL)
+			// Push to main directly as fallback
+			logf("  Falling back to direct push to main")
+			runGit(cloneDir, "checkout", "main")
+			runGit(cloneDir, "merge", branch)
+			if out, err := runGit(cloneDir, "push", "origin", "main"); err != nil {
+				logf("  Direct push also failed: %s", out)
+			}
+		} else {
+			logf("  PR created: %s", prURL)
+			logf("  Merging PR")
+			mergeCmd := exec.Command("gh", "pr", "merge", "--merge", "--delete-branch", prURL)
+			mergeCmd.Dir = cloneDir
+			mergeCmd.Env = gitEnv()
+			mergeOut, mergeErr := mergeCmd.CombinedOutput()
+			if mergeErr != nil {
+				logf("  PR merge failed: %s", strings.TrimSpace(string(mergeOut)))
+			} else {
+				logf("  PR merged")
+				result = result + "\n\nPR: " + prURL
 			}
 		}
 
-		delete(processingRepos, repoPath)
+		// Clean up temp clone
+		os.RemoveAll(cloneDir)
 
 		// Mark as done in queue
 		m.Status = "done"
@@ -396,9 +486,6 @@ func syncRepos(cfg Config) {
 	for _, repo := range cfg.Repos {
 		if _, err := os.Stat(repo.Path); err != nil {
 			logf("Repo not found: %s", repo.Path)
-			continue
-		}
-		if processingRepos[repo.Path] {
 			continue
 		}
 		if repo.ShouldPull() {
