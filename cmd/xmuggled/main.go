@@ -143,6 +143,13 @@ func runGit(dir string, args ...string) (string, error) {
 	return strings.TrimSpace(string(out)), err
 }
 
+func gitSync(dir string) (string, error) {
+	if out, err := runGit(dir, "fetch", "origin"); err != nil {
+		return out, err
+	}
+	return runGit(dir, "reset", "--hard", "origin/main")
+}
+
 func runShell(command, dir string) (string, error) {
 	cmd := exec.Command("sh", "-c", command)
 	if dir != "" {
@@ -203,7 +210,7 @@ func writeTaskMeta(metaFile string, m *taskMeta) error {
 func queueCommitPush(message string) {
 	runGit(queueDir, "add", "-A")
 	if _, err := runGit(queueDir, "commit", "-m", message); err == nil {
-		runGit(queueDir, "pull", "--rebase", "origin", "main")
+		gitSync(queueDir)
 		if out, err := runGit(queueDir, "push"); err != nil {
 			logf("  Queue push failed: %s", out)
 		}
@@ -225,7 +232,7 @@ func ensureQueueClone(cfg Config) bool {
 			return false
 		}
 	} else {
-		if out, err := runGit(queueDir, "pull", "--rebase", "origin", "main"); err != nil {
+		if out, err := gitSync(queueDir); err != nil {
 			logf("Queue pull failed: %s", out)
 			return false
 		}
@@ -307,7 +314,7 @@ func processQueue(cfg Config) {
 		queueCommitPush(fmt.Sprintf("processing: %s", taskID))
 
 		// Pull latest for the target repo
-		if out, err := runGit(repoPath, "pull", "--rebase", "origin", "main"); err != nil {
+		if out, err := gitSync(repoPath); err != nil {
 			logf("  Pull failed for %s: %s", repoPath, out)
 		}
 
@@ -395,7 +402,7 @@ func syncRepos(cfg Config) {
 			continue
 		}
 		if repo.ShouldPull() {
-			out, err := runGit(repo.Path, "pull", "--rebase", "origin", "main")
+			out, err := gitSync(repo.Path)
 			if err != nil {
 				logf("Pull failed %s: %s", filepath.Base(repo.Path), out)
 			} else if out != "" && !strings.Contains(out, "Already up to date") {
