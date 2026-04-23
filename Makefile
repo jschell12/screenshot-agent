@@ -25,7 +25,9 @@ daemon-stop:
 	$(INSTALL_DIR)/xmuggled stop
 
 daemon-restart:
-	launchctl kill SIGTERM gui/$(shell id -u)/$(LAUNCHD_LABEL)
+	-$(INSTALL_DIR)/xmuggled stop 2>/dev/null
+	-rm -f $(HOME)/.xmuggle/daemon.pid
+	$(INSTALL_DIR)/xmuggled start
 
 daemon-status:
 	$(INSTALL_DIR)/xmuggled status
