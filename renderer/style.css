@@ -767,15 +767,11 @@ header h1 {
   align-items: center;
 }
 
-.settings-repo-row .repo-path {
-  flex: 1;
-  background: #1a1a2e;
-  border: 1px solid #0f3460;
-  color: #e0e0e0;
-  border-radius: 4px;
-  padding: 6px 8px;
+.settings-repo-row .repo-name {
+  min-width: 100px;
   font-size: 12px;
-  font-family: "SF Mono", "Menlo", monospace;
+  color: #e94560;
+  font-weight: 600;
 }
 
 .settings-repo-row .repo-cmds {
@@ -789,7 +785,6 @@ header h1 {
   font-family: "SF Mono", "Menlo", monospace;
 }
 
-.settings-repo-row .repo-path:focus,
 .settings-repo-row .repo-cmds:focus {
   outline: none;
   border-color: #e94560;

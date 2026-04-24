@@ -321,8 +321,7 @@ settingsBtn.addEventListener('click', async () => {
       <div class="settings-field">
         <label>Repos &amp; Post Commands</label>
         <div id="settings-repos"></div>
-        <button id="settings-add-repo" class="link-btn" style="margin-top:6px;">+ Add repo</button>
-        <div class="settings-hint">After a task completes, pull changes and run commands in the local repo</div>
+        <div class="settings-hint">After a task completes, pull changes and run these commands in the local repo. Add projects above to see them here.</div>
       </div>
       <div class="modal-actions">
         <button id="settings-cancel" class="link-btn">Cancel</button>
@@ -334,38 +333,33 @@ settingsBtn.addEventListener('click', async () => {
   document.body.appendChild(modal);
   document.getElementById('settings-queue-url').value = queueUrl || '';
 
-  // Render repos list
+  // Render repos list — one row per configured project
   const reposContainer = document.getElementById('settings-repos');
+  // Ensure every project has a repo entry
+  for (const p of projects) {
+    if (!repos.find(r => r.path === p.path)) {
+      repos.push({ path: p.path, postCommands: [] });
+    }
+  }
   function renderRepos() {
     reposContainer.innerHTML = '';
     repos.forEach((repo, i) => {
+      const name = repo.path ? repo.path.split('/').pop() : '(unknown)';
+      const cmds = (repo.postCommands || []).join('; ');
       const row = document.createElement('div');
       row.className = 'settings-repo-row';
       row.innerHTML = `
-        <input type="text" class="repo-path" value="${repo.path || ''}" placeholder="/path/to/repo">
-        <input type="text" class="repo-cmds" value="${(repo.postCommands || []).join('; ')}" placeholder="make build; make install">
-        <button class="repo-remove link-btn" style="color:#d63031;padding:4px 6px;">×</button>
+        <span class="repo-name">${name}</span>
+        <input type="text" class="repo-cmds" value="${cmds}" placeholder="make build; make install">
       `;
-      row.querySelector('.repo-path').addEventListener('change', (e) => {
-        repos[i].path = e.target.value.trim();
-      });
       row.querySelector('.repo-cmds').addEventListener('change', (e) => {
         const val = e.target.value.trim();
         repos[i].postCommands = val ? val.split(';').map(s => s.trim()).filter(Boolean) : [];
-      });
-      row.querySelector('.repo-remove').addEventListener('click', () => {
-        repos.splice(i, 1);
-        renderRepos();
       });
       reposContainer.appendChild(row);
     });
   }
   renderRepos();
-
-  document.getElementById('settings-add-repo').addEventListener('click', () => {
-    repos.push({ path: '', postCommands: [] });
-    renderRepos();
-  });
 
   modal.addEventListener('click', (e) => { if (e.target === modal) modal.remove(); });
   document.getElementById('settings-cancel').addEventListener('click', () => modal.remove());
