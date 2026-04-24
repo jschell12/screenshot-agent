@@ -19,35 +19,13 @@ var (
 	configFile = filepath.Join(xmuggleDir, "daemon.json")
 	pidFile    = filepath.Join(xmuggleDir, "daemon.pid")
 	logFile    = filepath.Join(xmuggleDir, "daemon.log")
-	queueDir = filepath.Join(xmuggleDir, "queue-repo")
-	workDir  = filepath.Join(xmuggleDir, "work")
+	queueDir   = filepath.Join(xmuggleDir, "queue-repo")
+	workDir    = filepath.Join(xmuggleDir, "work")
 )
 
-type RepoConfig struct {
-	Path     string   `json:"path"`
-	Pull     *bool    `json:"pull,omitempty"`
-	Commands []string `json:"commands,omitempty"`
-}
-
-func (r *RepoConfig) UnmarshalJSON(data []byte) error {
-	var s string
-	if err := json.Unmarshal(data, &s); err == nil {
-		r.Path = s
-		return nil
-	}
-	type alias RepoConfig
-	return json.Unmarshal(data, (*alias)(r))
-}
-
-func (r RepoConfig) ShouldPull() bool {
-	return r.Pull == nil || *r.Pull
-}
-
 type Config struct {
-	Interval  int          `json:"interval"`
-	QueueRepo string       `json:"queueRepo"`
-	Repos     []RepoConfig `json:"repos"`
-	Commands  []string     `json:"commands"`
+	Interval  int    `json:"interval"`
+	QueueRepo string `json:"queueRepo"`
 }
 
 func defaultConfig() Config {
@@ -143,41 +121,14 @@ func runGit(dir string, args ...string) (string, error) {
 	return strings.TrimSpace(string(out)), err
 }
 
-func getRemoteURL(dir string) string {
-	out, err := runGit(dir, "remote", "get-url", "origin")
-	if err != nil {
-		return ""
+func projectToURL(project string) string {
+	if strings.HasPrefix(project, "git@") || strings.HasPrefix(project, "http") {
+		return project
 	}
-	return out
-}
-
-func gitSync(dir string) (string, error) {
-	if out, err := runGit(dir, "fetch", "origin"); err != nil {
-		return out, err
-	}
-	return runGit(dir, "reset", "--hard", "origin/main")
-}
-
-func runShell(command, dir string) (string, error) {
-	cmd := exec.Command("sh", "-c", command)
-	if dir != "" {
-		cmd.Dir = dir
-	}
-	cmd.Env = gitEnv()
-	out, err := cmd.CombinedOutput()
-	return strings.TrimSpace(string(out)), err
+	return fmt.Sprintf("git@github.com:%s.git", project)
 }
 
 // ── Queue message schema ──
-//
-// Each task lives in pending/<id>/meta.json with these fields:
-//   status: "pending" → "processing" → "done" | "error"
-//   processedBy: hostname of the machine that processed it
-//   result: summary of what was done
-//
-// Both daemons pull the queue repo. Only tasks with status "pending"
-// and from != self are processed. Once done, the status is updated
-// in place so the sender's daemon sees it and can update the UI.
 
 type taskMeta struct {
 	Filenames   []string `json:"filenames"`
@@ -200,7 +151,6 @@ func readTaskMeta(metaFile string) (*taskMeta, error) {
 	if err := json.Unmarshal(data, &m); err != nil {
 		return nil, err
 	}
-	// Default status for legacy tasks without a status field
 	if m.Status == "" {
 		m.Status = "pending"
 	}
@@ -212,11 +162,28 @@ func writeTaskMeta(metaFile string, m *taskMeta) error {
 	return os.WriteFile(metaFile, append(data, '\n'), 0644)
 }
 
+func syncQueue() bool {
+	gitDir := filepath.Join(queueDir, ".git")
+	if _, err := os.Stat(gitDir); err != nil {
+		return false
+	}
+	if out, err := runGit(queueDir, "fetch", "origin", "main"); err != nil {
+		logf("Queue fetch failed: %s", out)
+		return false
+	}
+	if out, err := runGit(queueDir, "reset", "--hard", "origin/main"); err != nil {
+		logf("Queue reset failed: %s", out)
+		return false
+	}
+	return true
+}
+
 func queueCommitPush(message string) {
 	runGit(queueDir, "add", "-A")
 	if _, err := runGit(queueDir, "commit", "-m", message); err == nil {
-		gitSync(queueDir)
-		if out, err := runGit(queueDir, "push"); err != nil {
+		runGit(queueDir, "fetch", "origin", "main")
+		runGit(queueDir, "rebase", "origin/main")
+		if out, err := runGit(queueDir, "push", "origin", "main"); err != nil {
 			logf("  Queue push failed: %s", out)
 		}
 	}
@@ -236,34 +203,9 @@ func ensureQueueClone(cfg Config) bool {
 			logf("Queue clone failed: %s", out)
 			return false
 		}
-	} else {
-		if out, err := gitSync(queueDir); err != nil {
-			logf("Queue pull failed: %s", out)
-			return false
-		}
+		return true
 	}
-	return true
-}
-
-func resolveProject(cfg Config, project string) string {
-	name := filepath.Base(project)
-	for _, r := range cfg.Repos {
-		if filepath.Base(r.Path) == name {
-			return r.Path
-		}
-	}
-	home := homeDir()
-	candidates := []string{
-		filepath.Join(home, "development", "github.com", project),
-		filepath.Join(home, "dev", project),
-		filepath.Join(home, project),
-	}
-	for _, c := range candidates {
-		if _, err := os.Stat(filepath.Join(c, ".git")); err == nil {
-			return c
-		}
-	}
-	return ""
+	return syncQueue()
 }
 
 func processQueue(cfg Config) {
@@ -293,24 +235,16 @@ func processQueue(cfg Config) {
 			continue
 		}
 
-		// Skip tasks not in pending state
 		if m.Status != "pending" {
 			continue
 		}
 
-		// Skip our own submissions
 		if m.From == host {
 			continue
 		}
 
-		// Resolve project to local path
-		repoPath := resolveProject(cfg, m.Project)
-		if repoPath == "" {
-			logf("Unknown project %q in task %s, skipping", m.Project, taskID)
-			continue
-		}
-
-		logf("Processing task %s for %s", taskID, filepath.Base(repoPath))
+		remoteURL := projectToURL(m.Project)
+		logf("Processing task %s for %s", taskID, m.Project)
 
 		// Mark as processing
 		m.Status = "processing"
@@ -318,22 +252,10 @@ func processQueue(cfg Config) {
 		writeTaskMeta(metaFile, m)
 		queueCommitPush(fmt.Sprintf("processing: %s", taskID))
 
-		// Get remote URL to clone from
-		remoteURL := getRemoteURL(repoPath)
-		if remoteURL == "" {
-			logf("  No git remote for %s", repoPath)
-			m.Status = "error"
-			m.Result = "No git remote URL found"
-			m.DoneAt = time.Now().Format(time.RFC3339)
-			writeTaskMeta(metaFile, m)
-			queueCommitPush(fmt.Sprintf("error: %s — no remote", taskID))
-			continue
-		}
-
-		// Clone to temp dir
+		// Clone target repo to temp dir
 		_ = os.MkdirAll(workDir, 0755)
-		cloneDir := filepath.Join(workDir, fmt.Sprintf("%s-%s", filepath.Base(repoPath), taskID))
-		logf("  Cloning %s to %s", filepath.Base(repoPath), filepath.Base(cloneDir))
+		cloneDir := filepath.Join(workDir, fmt.Sprintf("%s-%s", filepath.Base(m.Project), taskID))
+		logf("  Cloning %s", m.Project)
 		if out, err := runGit("", "clone", "--depth", "1", remoteURL, cloneDir); err != nil {
 			logf("  Clone failed: %s", out)
 			m.Status = "error"
@@ -444,7 +366,6 @@ func processQueue(cfg Config) {
 
 		if prErr != nil {
 			logf("  PR create failed: %s", prURL)
-			// Push to main directly as fallback
 			logf("  Falling back to direct push to main")
 			runGit(cloneDir, "checkout", "main")
 			runGit(cloneDir, "merge", branch)
@@ -480,47 +401,11 @@ func processQueue(cfg Config) {
 	}
 }
 
-// ── Repo sync ──
-
-func syncRepos(cfg Config) {
-	for _, repo := range cfg.Repos {
-		if _, err := os.Stat(repo.Path); err != nil {
-			logf("Repo not found: %s", repo.Path)
-			continue
-		}
-		if repo.ShouldPull() {
-			out, err := gitSync(repo.Path)
-			if err != nil {
-				logf("Pull failed %s: %s", filepath.Base(repo.Path), out)
-			} else if out != "" && !strings.Contains(out, "Already up to date") {
-				logf("Pulled %s: %s", filepath.Base(repo.Path), out)
-			}
-		}
-		for _, cmd := range repo.Commands {
-			runCommand(cmd, repo.Path)
-		}
-	}
-}
-
-func runCommand(command, dir string) {
-	logf("Running: %s", command)
-	out, err := runShell(command, dir)
-	if err != nil {
-		logf("  Error: %s", out)
-	} else if out != "" {
-		logf("  %s", out)
-	}
-}
-
 // ── Cycle ──
 
 func runCycle() {
 	cfg := loadConfig()
-	syncRepos(cfg)
 	processQueue(cfg)
-	for _, cmd := range cfg.Commands {
-		runCommand(cmd, "")
-	}
 }
 
 // ── CLI ──
@@ -612,7 +497,6 @@ func main() {
 		fmt.Printf("Config:     %s\n", configFile)
 		fmt.Printf("Interval:   %ds\n", cfg.Interval)
 		fmt.Printf("Queue repo: %s\n", orDefault(cfg.QueueRepo, "(none)"))
-		fmt.Printf("Repos:      %d\n", len(cfg.Repos))
 
 	case "config":
 		ensureConfig()
@@ -631,32 +515,6 @@ func main() {
 		c.Stderr = os.Stderr
 		_ = c.Run()
 
-	case "add-repo":
-		if len(os.Args) < 3 {
-			fmt.Fprintln(os.Stderr, "Usage: xmuggled add-repo <path> [command...]")
-			os.Exit(1)
-		}
-		ensureConfig()
-		cfg := loadConfig()
-		abs, _ := filepath.Abs(os.Args[2])
-		cmds := os.Args[3:]
-		found := false
-		for i, r := range cfg.Repos {
-			if r.Path == abs {
-				if len(cmds) > 0 {
-					cfg.Repos[i].Commands = cmds
-				}
-				found = true
-				fmt.Printf("Updated repo: %s\n", abs)
-				break
-			}
-		}
-		if !found {
-			cfg.Repos = append(cfg.Repos, RepoConfig{Path: abs, Commands: cmds})
-			fmt.Printf("Added repo: %s\n", abs)
-		}
-		saveConfig(cfg)
-
 	case "set-queue":
 		if len(os.Args) < 3 {
 			fmt.Fprintln(os.Stderr, "Usage: xmuggled set-queue <repo-url>")
@@ -667,18 +525,6 @@ func main() {
 		cfg.QueueRepo = os.Args[2]
 		saveConfig(cfg)
 		fmt.Printf("Queue repo set: %s\n", cfg.QueueRepo)
-
-	case "add-command":
-		if len(os.Args) < 3 {
-			fmt.Fprintln(os.Stderr, "Usage: xmuggled add-command <command>")
-			os.Exit(1)
-		}
-		ensureConfig()
-		cfg := loadConfig()
-		cmd := strings.Join(os.Args[2:], " ")
-		cfg.Commands = append(cfg.Commands, cmd)
-		saveConfig(cfg)
-		fmt.Printf("Added command: %s\n", cmd)
 
 	case "log":
 		n := 20
@@ -701,7 +547,7 @@ func main() {
 		fmt.Println(strings.Join(lines[start:], "\n"))
 
 	default:
-		fmt.Print(`xmuggled — xmuggle sync daemon
+		fmt.Print(`xmuggled — xmuggle queue daemon
 
 Usage:
   xmuggled start                   Start daemon (background)
@@ -712,8 +558,6 @@ Usage:
   xmuggled edit                    Open config in $EDITOR
   xmuggled log [n]                 Show last n log lines (default 20)
   xmuggled set-queue <repo-url>    Set queue repo URL
-  xmuggled add-repo <path> [cmd]   Add a repo to sync
-  xmuggled add-command <cmd>       Add a global command
 
 Config: ~/.xmuggle/daemon.json
 `)
