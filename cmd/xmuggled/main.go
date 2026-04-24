@@ -10,6 +10,8 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"syscall"
 	"time"
 )
@@ -23,13 +25,29 @@ var (
 	workDir    = filepath.Join(xmuggleDir, "work")
 )
 
+// Concurrency state
+var (
+	activeWorkers sync.WaitGroup
+	workerCount   atomic.Int32
+	workerSem     chan struct{}
+	queueMu       sync.Mutex
+	activeTasks   = make(map[string]bool)
+	activeTasksMu sync.Mutex
+)
+
 type Config struct {
-	Interval  int    `json:"interval"`
-	QueueRepo string `json:"queueRepo"`
+	Interval     int    `json:"interval"`
+	QueueRepo    string `json:"queueRepo"`
+	MaxWorkers   int    `json:"maxWorkers"`
+	AQScriptsDir string `json:"aqScriptsDir"`
 }
 
 func defaultConfig() Config {
-	return Config{Interval: 10}
+	return Config{
+		Interval:     10,
+		MaxWorkers:   3,
+		AQScriptsDir: filepath.Join(homeDir(), "development", "github.com", "jschell12", "agent-queue", "scripts"),
+	}
 }
 
 func homeDir() string {
@@ -53,6 +71,12 @@ func loadConfig() Config {
 	_ = json.Unmarshal(data, &cfg)
 	if cfg.Interval < 1 {
 		cfg.Interval = 10
+	}
+	if cfg.MaxWorkers < 1 {
+		cfg.MaxWorkers = 3
+	}
+	if cfg.AQScriptsDir == "" {
+		cfg.AQScriptsDir = defaultConfig().AQScriptsDir
 	}
 	return cfg
 }
@@ -171,8 +195,6 @@ func syncQueue() bool {
 		logf("Queue fetch failed: %s", out)
 		return false
 	}
-	// Reset to FETCH_HEAD — safe because the queue repo has no local work to preserve
-	// between poll cycles. Local commits from queueCommitPush are pushed immediately.
 	if out, err := runGit(queueDir, "reset", "--hard", "FETCH_HEAD"); err != nil {
 		logf("Queue reset failed: %s", out)
 		return false
@@ -180,10 +202,12 @@ func syncQueue() bool {
 	return true
 }
 
-func queueCommitPush(message string) {
+// queueCommitPushSafe wraps queue git ops in a mutex for concurrent workers.
+func queueCommitPushSafe(message string) {
+	queueMu.Lock()
+	defer queueMu.Unlock()
 	runGit(queueDir, "add", "-A")
 	if _, err := runGit(queueDir, "commit", "-m", message); err == nil {
-		// Fetch + rebase onto FETCH_HEAD to preserve our commit on top
 		runGit(queueDir, "fetch", "origin", "main")
 		runGit(queueDir, "rebase", "FETCH_HEAD")
 		if out, err := runGit(queueDir, "push", "origin", "main"); err != nil {
@@ -230,6 +254,15 @@ func processQueue(cfg Config) {
 		}
 
 		taskID := entry.Name()
+
+		// Skip if already being processed by a worker
+		activeTasksMu.Lock()
+		if activeTasks[taskID] {
+			activeTasksMu.Unlock()
+			continue
+		}
+		activeTasksMu.Unlock()
+
 		taskDir := filepath.Join(pendingDir, taskID)
 		metaFile := filepath.Join(taskDir, "meta.json")
 
@@ -246,146 +279,178 @@ func processQueue(cfg Config) {
 			continue
 		}
 
-		remoteURL := projectToURL(m.Project)
-		logf("Processing task %s for %s", taskID, m.Project)
+		// Try to acquire a worker slot
+		select {
+		case workerSem <- struct{}{}:
+			// Got a slot
+		default:
+			logf("All %d worker slots occupied, deferring remaining tasks", cfg.MaxWorkers)
+			return
+		}
 
-		// Mark as processing
+		// Mark as active
+		activeTasksMu.Lock()
+		activeTasks[taskID] = true
+		activeTasksMu.Unlock()
+
+		// Mark as processing in xmuggle-queue
 		m.Status = "processing"
 		m.ProcessedBy = host
 		writeTaskMeta(metaFile, m)
-		queueCommitPush(fmt.Sprintf("processing: %s", taskID))
+		queueCommitPushSafe(fmt.Sprintf("processing: %s", taskID))
 
-		// Clone target repo to temp dir
-		_ = os.MkdirAll(workDir, 0755)
-		cloneDir := filepath.Join(workDir, fmt.Sprintf("%s-%s", filepath.Base(m.Project), taskID))
-		logf("  Cloning %s", m.Project)
-		if out, err := runGit("", "clone", "--depth", "1", remoteURL, cloneDir); err != nil {
-			logf("  Clone failed: %s", out)
-			m.Status = "error"
-			m.Result = fmt.Sprintf("Clone failed: %s", out)
-			m.DoneAt = time.Now().Format(time.RFC3339)
-			writeTaskMeta(metaFile, m)
-			queueCommitPush(fmt.Sprintf("error: %s — clone failed", taskID))
+		logf("Dispatching task %s for %s (workers: %d/%d)",
+			taskID, m.Project, workerCount.Load()+1, cfg.MaxWorkers)
+
+		// Spawn worker goroutine
+		workerCount.Add(1)
+		activeWorkers.Add(1)
+		go runWorker(cfg, m, taskID, taskDir)
+	}
+}
+
+// ── Worker ──
+
+func runWorker(cfg Config, m *taskMeta, taskID, taskDir string) {
+	defer activeWorkers.Done()
+	defer workerCount.Add(-1)
+	defer func() { <-workerSem }()
+	defer func() {
+		activeTasksMu.Lock()
+		delete(activeTasks, taskID)
+		activeTasksMu.Unlock()
+	}()
+
+	metaFile := filepath.Join(taskDir, "meta.json")
+	projectName := filepath.Base(m.Project)
+	remoteURL := projectToURL(m.Project)
+	aqScript := filepath.Join(cfg.AQScriptsDir, "agent-queue")
+	amScript := filepath.Join(cfg.AQScriptsDir, "agent-merge")
+
+	// Clone via agent-queue clone for isolated workspace
+	sessionID := fmt.Sprintf("xmuggle-%s", taskID)
+	_ = os.MkdirAll(workDir, 0755)
+
+	logf("  [%s] Cloning %s", taskID, m.Project)
+	cloneCmd := exec.Command("python3", aqScript, "clone", remoteURL, sessionID, "--parent", workDir)
+	cloneCmd.Env = gitEnv()
+	cloneOut, cloneErr := cloneCmd.CombinedOutput()
+	if cloneErr != nil {
+		logf("  [%s] Clone failed: %s", taskID, strings.TrimSpace(string(cloneOut)))
+		markError(m, metaFile, taskID, fmt.Sprintf("Clone failed: %s", strings.TrimSpace(string(cloneOut))))
+		return
+	}
+
+	// Parse clone output for clone_dir and branch
+	var cloneResult struct {
+		CloneDir string `json:"clone_dir"`
+		Branch   string `json:"branch"`
+	}
+	if err := json.Unmarshal(cloneOut, &cloneResult); err != nil {
+		// Fallback: construct paths manually
+		cloneResult.CloneDir = filepath.Join(workDir, fmt.Sprintf("%s-%s", projectName, sessionID))
+		cloneResult.Branch = fmt.Sprintf("%s-%s", projectName, sessionID)
+	}
+	cloneDir := cloneResult.CloneDir
+	branch := cloneResult.Branch
+
+	defer os.RemoveAll(cloneDir)
+
+	// Collect attachments
+	var imgPaths []string
+	var textContent []string
+	for _, f := range m.Filenames {
+		p := filepath.Join(taskDir, f)
+		if _, err := os.Stat(p); err != nil {
 			continue
 		}
-
-		// Create branch
-		branch := fmt.Sprintf("xmuggle-fix-%s", taskID)
-		runGit(cloneDir, "checkout", "-b", branch)
-
-		// Collect attachments — images and text files
-		var imgPaths []string
-		var textContent []string
-		for _, f := range m.Filenames {
-			p := filepath.Join(taskDir, f)
-			if _, err := os.Stat(p); err != nil {
-				continue
+		ext := strings.ToLower(filepath.Ext(f))
+		if ext == ".txt" || ext == ".md" {
+			data, err := os.ReadFile(p)
+			if err == nil {
+				textContent = append(textContent, string(data))
 			}
-			ext := strings.ToLower(filepath.Ext(f))
-			if ext == ".txt" || ext == ".md" {
-				data, err := os.ReadFile(p)
-				if err == nil {
-					textContent = append(textContent, string(data))
-				}
-			} else {
-				imgPaths = append(imgPaths, p)
-			}
+		} else {
+			imgPaths = append(imgPaths, p)
 		}
+	}
 
-		if len(imgPaths) == 0 && len(textContent) == 0 && m.Message == "" {
-			logf("  No content in task %s", taskID)
-			os.RemoveAll(cloneDir)
-			m.Status = "error"
-			m.Result = "No content found in task"
-			m.DoneAt = time.Now().Format(time.RFC3339)
-			writeTaskMeta(metaFile, m)
-			queueCommitPush(fmt.Sprintf("error: %s — no content", taskID))
-			continue
-		}
+	if len(imgPaths) == 0 && len(textContent) == 0 && m.Message == "" {
+		logf("  [%s] No content", taskID)
+		markError(m, metaFile, taskID, "No content found in task")
+		return
+	}
 
-		// Build prompt based on what we have
-		var promptParts []string
-		if len(imgPaths) > 0 {
-			promptParts = append(promptParts,
-				fmt.Sprintf("Analyze the screenshot(s) at %s and fix any bugs or UI issues you find in this repo.", strings.Join(imgPaths, ", ")))
-		}
-		if len(textContent) > 0 {
-			promptParts = append(promptParts, "Here is additional context:\n\n"+strings.Join(textContent, "\n\n"))
-		}
-		if m.Message != "" {
-			promptParts = append(promptParts, m.Message)
-		}
-		prompt := strings.Join(promptParts, "\n\n")
+	// Build prompt
+	var promptParts []string
+	if len(imgPaths) > 0 {
+		promptParts = append(promptParts,
+			fmt.Sprintf("Analyze the screenshot(s) at %s and fix any bugs or UI issues you find in this repo.", strings.Join(imgPaths, ", ")))
+	}
+	if len(textContent) > 0 {
+		promptParts = append(promptParts, "Here is additional context:\n\n"+strings.Join(textContent, "\n\n"))
+	}
+	if m.Message != "" {
+		promptParts = append(promptParts, m.Message)
+	}
+	prompt := strings.Join(promptParts, "\n\n")
 
-		// Spawn claude in the temp clone, stream output to a log file
-		claudeLog := filepath.Join(xmuggleDir, "claude-"+taskID+".log")
-		logf("  Spawning claude on branch %s", branch)
-		logf("  Tail live: tail -f %s | python3 scripts/claude-log-filter.py", claudeLog)
-		cmd := exec.Command("claude", "--print", "--verbose", "--output-format", "stream-json", "--dangerously-skip-permissions", prompt)
-		cmd.Dir = cloneDir
-		cmd.Env = gitEnv()
-		claudeLogFile, _ := os.Create(claudeLog)
-		cmd.Stdout = claudeLogFile
-		cmd.Stderr = claudeLogFile
-		err = cmd.Run()
-		claudeLogFile.Close()
-		outputBytes, _ := os.ReadFile(claudeLog)
-		result := strings.TrimSpace(string(outputBytes))
+	// Spawn Claude
+	claudeLog := filepath.Join(xmuggleDir, "claude-"+taskID+".log")
+	logf("  [%s] Spawning claude on branch %s", taskID, branch)
+	logf("  [%s] Tail live: tail -f %s | python3 scripts/claude-log-filter.py", taskID, claudeLog)
 
-		if err != nil {
-			logf("  Claude failed: %v\n%s", err, result)
-			os.RemoveAll(cloneDir)
-			m.Status = "error"
-			m.Result = fmt.Sprintf("Claude failed: %v", err)
-			m.DoneAt = time.Now().Format(time.RFC3339)
-			writeTaskMeta(metaFile, m)
-			queueCommitPush(fmt.Sprintf("error: %s", taskID))
-			continue
-		}
+	claudeCmd := exec.Command("claude", "--print", "--verbose", "--output-format", "stream-json", "--dangerously-skip-permissions", prompt)
+	claudeCmd.Dir = cloneDir
+	claudeCmd.Env = gitEnv()
+	claudeLogFile, _ := os.Create(claudeLog)
+	claudeCmd.Stdout = claudeLogFile
+	claudeCmd.Stderr = claudeLogFile
+	claudeErr := claudeCmd.Run()
+	claudeLogFile.Close()
+	outputBytes, _ := os.ReadFile(claudeLog)
+	result := strings.TrimSpace(string(outputBytes))
 
-		logf("  Claude finished")
+	if claudeErr != nil {
+		logf("  [%s] Claude failed: %v", taskID, claudeErr)
+		markError(m, metaFile, taskID, fmt.Sprintf("Claude failed: %v", claudeErr))
+		return
+	}
 
-		// Check if claude made changes
-		porcelain, _ := runGit(cloneDir, "status", "--porcelain")
-		if porcelain == "" {
-			logf("  No changes made")
-			os.RemoveAll(cloneDir)
-			m.Status = "done"
-			m.Result = result
-			m.DoneAt = time.Now().Format(time.RFC3339)
-			writeTaskMeta(metaFile, m)
-			queueCommitPush(fmt.Sprintf("done: %s — no changes", taskID))
-			logf("  Task %s complete (no changes)", taskID)
-			continue
-		}
+	logf("  [%s] Claude finished", taskID)
 
-		// Commit, push branch, create PR, merge, clean up
-		runGit(cloneDir, "add", "-A")
-		commitMsg := fmt.Sprintf("xmuggle: fix from task %s", taskID)
-		runGit(cloneDir, "commit", "-m", commitMsg)
+	// Check for changes
+	porcelain, _ := runGit(cloneDir, "status", "--porcelain")
+	if porcelain == "" {
+		logf("  [%s] No changes made", taskID)
+		markDone(m, metaFile, taskID, result)
+		return
+	}
 
-		// Unshallow so we can push the branch
+	// Commit changes
+	runGit(cloneDir, "add", "-A")
+	commitMsg := fmt.Sprintf("xmuggle: fix from task %s", taskID)
+	runGit(cloneDir, "commit", "-m", commitMsg)
+
+	// Merge via agent-merge (serialized per-project lock)
+	logf("  [%s] Merging via agent-merge", taskID)
+	mergeCmd := exec.Command("python3", amScript, branch, "--delete-branch", "-p", projectName)
+	mergeCmd.Dir = cloneDir
+	mergeCmd.Env = gitEnv()
+	mergeOut, mergeErr := mergeCmd.CombinedOutput()
+	mergeOutput := strings.TrimSpace(string(mergeOut))
+
+	if mergeErr != nil {
+		logf("  [%s] agent-merge failed: %s", taskID, mergeOutput)
+		// Fallback: push branch and create PR
+		logf("  [%s] Falling back to PR flow", taskID)
 		runGit(cloneDir, "fetch", "--unshallow")
+		runGit(cloneDir, "push", "origin", branch)
 
-		logf("  Pushing branch %s", branch)
-		if out, err := runGit(cloneDir, "push", "origin", branch); err != nil {
-			logf("  Push branch failed: %s", out)
-			os.RemoveAll(cloneDir)
-			m.Status = "error"
-			m.Result = fmt.Sprintf("Push failed: %s", out)
-			m.DoneAt = time.Now().Format(time.RFC3339)
-			writeTaskMeta(metaFile, m)
-			queueCommitPush(fmt.Sprintf("error: %s — push failed", taskID))
-			continue
-		}
-
-		// Create and merge PR via gh CLI
-		logf("  Creating PR")
 		prCmd := exec.Command("gh", "pr", "create",
 			"--title", commitMsg,
 			"--body", fmt.Sprintf("Automated fix from xmuggle task %s\n\n%s", taskID, m.Message),
-			"--head", branch,
-			"--base", "main",
+			"--head", branch, "--base", "main",
 		)
 		prCmd.Dir = cloneDir
 		prCmd.Env = gitEnv()
@@ -393,40 +458,38 @@ func processQueue(cfg Config) {
 		prURL := strings.TrimSpace(string(prOut))
 
 		if prErr != nil {
-			logf("  PR create failed: %s", prURL)
-			logf("  Falling back to direct push to main")
-			runGit(cloneDir, "checkout", "main")
-			runGit(cloneDir, "merge", branch)
-			if out, err := runGit(cloneDir, "push", "origin", "main"); err != nil {
-				logf("  Direct push also failed: %s", out)
-			}
+			logf("  [%s] PR create also failed: %s", taskID, prURL)
 		} else {
-			logf("  PR created: %s", prURL)
-			logf("  Merging PR")
-			mergeCmd := exec.Command("gh", "pr", "merge", "--merge", "--delete-branch", prURL)
-			mergeCmd.Dir = cloneDir
-			mergeCmd.Env = gitEnv()
-			mergeOut, mergeErr := mergeCmd.CombinedOutput()
-			if mergeErr != nil {
-				logf("  PR merge failed: %s", strings.TrimSpace(string(mergeOut)))
-			} else {
-				logf("  PR merged")
-				result = result + "\n\nPR: " + prURL
-			}
+			logf("  [%s] PR created: %s", taskID, prURL)
+			ghMerge := exec.Command("gh", "pr", "merge", "--merge", "--delete-branch", prURL)
+			ghMerge.Dir = cloneDir
+			ghMerge.Env = gitEnv()
+			ghMerge.Run()
+			result = result + "\n\nPR: " + prURL
 		}
-
-		// Clean up temp clone
-		os.RemoveAll(cloneDir)
-
-		// Mark as done in queue
-		m.Status = "done"
-		m.Result = result
-		m.DoneAt = time.Now().Format(time.RFC3339)
-		writeTaskMeta(metaFile, m)
-		queueCommitPush(fmt.Sprintf("done: %s", taskID))
-
-		logf("  Task %s complete", taskID)
+	} else {
+		logf("  [%s] Merged to main via agent-merge", taskID)
 	}
+
+	markDone(m, metaFile, taskID, result)
+}
+
+func markDone(m *taskMeta, metaFile, taskID, result string) {
+	m.Status = "done"
+	m.Result = result
+	m.DoneAt = time.Now().Format(time.RFC3339)
+	writeTaskMeta(metaFile, m)
+	queueCommitPushSafe(fmt.Sprintf("done: %s", taskID))
+	logf("  [%s] Task complete", taskID)
+}
+
+func markError(m *taskMeta, metaFile, taskID, reason string) {
+	m.Status = "error"
+	m.Result = reason
+	m.DoneAt = time.Now().Format(time.RFC3339)
+	writeTaskMeta(metaFile, m)
+	queueCommitPushSafe(fmt.Sprintf("error: %s", taskID))
+	logf("  [%s] Task failed: %s", taskID, reason)
 }
 
 // ── Cycle ──
@@ -471,9 +534,10 @@ func main() {
 	case "_run-daemon":
 		setupLog()
 		cfg := loadConfig()
+		workerSem = make(chan struct{}, cfg.MaxWorkers)
 		_ = os.MkdirAll(xmuggleDir, 0755)
 		_ = os.WriteFile(pidFile, []byte(strconv.Itoa(os.Getpid())), 0644)
-		logf("Daemon starting (pid %d, interval %ds)", os.Getpid(), cfg.Interval)
+		logf("Daemon starting (pid %d, interval %ds, maxWorkers %d)", os.Getpid(), cfg.Interval, cfg.MaxWorkers)
 
 		sig := make(chan os.Signal, 1)
 		signal.Notify(sig, syscall.SIGTERM, syscall.SIGINT)
@@ -488,7 +552,9 @@ func main() {
 			case <-ticker.C:
 				runCycle()
 			case s := <-sig:
-				logf("Received %s, shutting down", s)
+				logf("Received %s, waiting for %d workers...", s, workerCount.Load())
+				activeWorkers.Wait()
+				logf("All workers finished, shutting down")
 				_ = os.Remove(pidFile)
 				return
 			}
@@ -497,8 +563,12 @@ func main() {
 	case "run":
 		ensureConfig()
 		setupLog()
-		logf("Running single cycle")
+		cfg := loadConfig()
+		workerSem = make(chan struct{}, cfg.MaxWorkers)
+		logf("Running single cycle (maxWorkers %d)", cfg.MaxWorkers)
 		runCycle()
+		logf("Waiting for workers...")
+		activeWorkers.Wait()
 		logf("Done")
 
 	case "stop":
@@ -522,9 +592,11 @@ func main() {
 			fmt.Println("Daemon not running")
 		}
 		cfg := loadConfig()
-		fmt.Printf("Config:     %s\n", configFile)
-		fmt.Printf("Interval:   %ds\n", cfg.Interval)
-		fmt.Printf("Queue repo: %s\n", orDefault(cfg.QueueRepo, "(none)"))
+		fmt.Printf("Config:      %s\n", configFile)
+		fmt.Printf("Interval:    %ds\n", cfg.Interval)
+		fmt.Printf("MaxWorkers:  %d\n", cfg.MaxWorkers)
+		fmt.Printf("Queue repo:  %s\n", orDefault(cfg.QueueRepo, "(none)"))
+		fmt.Printf("AQ scripts:  %s\n", cfg.AQScriptsDir)
 
 	case "config":
 		ensureConfig()
