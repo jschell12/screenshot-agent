@@ -312,7 +312,7 @@ func processQueue(cfg Config) {
 		// Spawn claude in the temp clone, stream output to a log file
 		claudeLog := filepath.Join(xmuggleDir, "claude-"+taskID+".log")
 		logf("  Spawning claude on branch %s", branch)
-		logf("  Tail live: tail -f %s", claudeLog)
+		logf("  Tail live: tail -f %s | python3 scripts/claude-log-filter.py", claudeLog)
 		cmd := exec.Command("claude", "--print", "--verbose", "--output-format", "stream-json", "--dangerously-skip-permissions", prompt)
 		cmd.Dir = cloneDir
 		cmd.Env = gitEnv()
