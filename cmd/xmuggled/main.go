@@ -470,6 +470,16 @@ func runWorker(cfg Config, m *taskMeta, taskID, taskDir string) {
 	result := strings.TrimSpace(resultBuf.String())
 
 	if claudeErr != nil {
+		// Exit code 143 = killed by SIGTERM (128+15), e.g. daemon restart.
+		// Requeue instead of marking as permanent error so next cycle retries.
+		if exitErr, ok := claudeErr.(*exec.ExitError); ok && exitErr.ExitCode() == 143 {
+			logf("  [%s] Claude killed by SIGTERM, requeueing task", taskID)
+			m.Status = "pending"
+			m.ProcessedBy = ""
+			writeTaskMeta(metaFile, m)
+			queueCommitPushSafe(fmt.Sprintf("requeue (SIGTERM): %s", taskID))
+			return
+		}
 		logf("  [%s] Claude failed: %v", taskID, claudeErr)
 		markError(m, metaFile, taskID, fmt.Sprintf("Claude failed: %v", claudeErr))
 		return
