@@ -319,6 +319,14 @@ settingsBtn.addEventListener('click', async () => {
         <div class="settings-hint">Used for git push auth. Leave blank to keep current value.</div>
       </div>
       <div class="settings-field">
+        <label>AI CLI</label>
+        <select id="settings-ai-cli">
+          <option value="claude">Claude</option>
+          <option value="cursor">Cursor</option>
+        </select>
+        <div class="settings-hint">Which AI CLI to use for processing tasks (can override per repo)</div>
+      </div>
+      <div class="settings-field">
         <label>Repos &amp; Post Commands</label>
         <div id="settings-repos"></div>
         <div class="settings-hint">After a task completes, pull changes and run these commands in the local repo. Add projects above to see them here.</div>
@@ -332,6 +340,7 @@ settingsBtn.addEventListener('click', async () => {
   `;
   document.body.appendChild(modal);
   document.getElementById('settings-queue-url').value = queueUrl || '';
+  document.getElementById('settings-ai-cli').value = daemonCfg.aiCli || 'claude';
 
   // Render repos list — one row per configured project
   const reposContainer = document.getElementById('settings-repos');
@@ -346,15 +355,24 @@ settingsBtn.addEventListener('click', async () => {
     repos.forEach((repo, i) => {
       const name = repo.path ? repo.path.split('/').pop() : '(unknown)';
       const cmds = (repo.postCommands || []).join('; ');
+      const repoCli = repo.aiCli || '';
       const row = document.createElement('div');
       row.className = 'settings-repo-row';
       row.innerHTML = `
         <span class="repo-name">${name}</span>
+        <select class="repo-cli" title="AI CLI override">
+          <option value="">default</option>
+          <option value="claude" ${repoCli === 'claude' ? 'selected' : ''}>Claude</option>
+          <option value="cursor" ${repoCli === 'cursor' ? 'selected' : ''}>Cursor</option>
+        </select>
         <input type="text" class="repo-cmds" value="${cmds}" placeholder="make build; make install">
       `;
       row.querySelector('.repo-cmds').addEventListener('change', (e) => {
         const val = e.target.value.trim();
         repos[i].postCommands = val ? val.split(';').map(s => s.trim()).filter(Boolean) : [];
+      });
+      row.querySelector('.repo-cli').addEventListener('change', (e) => {
+        repos[i].aiCli = e.target.value || undefined;
       });
       reposContainer.appendChild(row);
     });
@@ -433,7 +451,8 @@ settingsBtn.addEventListener('click', async () => {
       await window.xmuggle.setGhToken(newToken);
     }
 
-    // Save repos config
+    // Save AI CLI + repos config
+    daemonCfg.aiCli = document.getElementById('settings-ai-cli').value;
     const validRepos = repos.filter(r => r.path);
     daemonCfg.repos = validRepos;
     await window.xmuggle.setDaemonConfig(daemonCfg);

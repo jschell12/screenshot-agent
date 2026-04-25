@@ -46,6 +46,7 @@ var postCmdProcs = struct {
 type RepoConfig struct {
 	Path         string   `json:"path"`
 	PostCommands []string `json:"postCommands,omitempty"`
+	AICli        string   `json:"aiCli,omitempty"` // per-repo override: "claude" or "cursor"
 }
 
 type Config struct {
@@ -53,6 +54,7 @@ type Config struct {
 	QueueRepo    string       `json:"queueRepo"`
 	MaxWorkers   int          `json:"maxWorkers"`
 	AQScriptsDir string       `json:"aqScriptsDir"`
+	AICli        string       `json:"aiCli"`
 	Repos        []RepoConfig `json:"repos,omitempty"`
 }
 
@@ -60,6 +62,7 @@ func defaultConfig() Config {
 	return Config{
 		Interval:     10,
 		MaxWorkers:   3,
+		AICli:        "claude",
 		AQScriptsDir: filepath.Join(homeDir(), "development", "github.com", "jschell12", "agent-queue", "scripts"),
 	}
 }
@@ -92,7 +95,29 @@ func loadConfig() Config {
 	if cfg.AQScriptsDir == "" {
 		cfg.AQScriptsDir = defaultConfig().AQScriptsDir
 	}
+	if cfg.AICli == "" {
+		cfg.AICli = "claude"
+	}
 	return cfg
+}
+
+// buildAICommand returns an exec.Cmd for the configured AI CLI.
+func buildAICommand(cliName, prompt string) *exec.Cmd {
+	switch cliName {
+	case "cursor":
+		return exec.Command("agent", "--print", "--trust", "--force", "--output-format", "stream-json", prompt)
+	default: // "claude"
+		return exec.Command("claude", "--print", "--verbose", "--output-format", "stream-json", "--dangerously-skip-permissions", prompt)
+	}
+}
+
+// resolveAICli returns the CLI to use for a given project, checking per-repo override first.
+func resolveAICli(cfg Config, project string) string {
+	rc := findRepoConfig(cfg, project)
+	if rc != nil && rc.AICli != "" {
+		return rc.AICli
+	}
+	return cfg.AICli
 }
 
 func saveConfig(cfg Config) {
@@ -445,7 +470,9 @@ func runWorker(cfg Config, m *taskMeta, taskID, taskDir string) {
 	// Spawn Claude — stream output and log filtered lines to daemon log
 	logf("  [%s] Spawning claude on branch %s", taskID, branch)
 
-	claudeCmd := exec.Command("claude", "--print", "--verbose", "--output-format", "stream-json", "--dangerously-skip-permissions", prompt)
+	aiCli := resolveAICli(cfg, m.Project)
+	logf("  [%s] Using AI CLI: %s", taskID, aiCli)
+	claudeCmd := buildAICommand(aiCli, prompt)
 	claudeCmd.Dir = cloneDir
 	claudeCmd.Env = gitEnv()
 
@@ -849,11 +876,16 @@ func main() {
 		fmt.Printf("Interval:    %ds\n", cfg.Interval)
 		fmt.Printf("MaxWorkers:  %d\n", cfg.MaxWorkers)
 		fmt.Printf("Queue repo:  %s\n", orDefault(cfg.QueueRepo, "(none)"))
+		fmt.Printf("AI CLI:      %s\n", cfg.AICli)
 		fmt.Printf("AQ scripts:  %s\n", cfg.AQScriptsDir)
 		if len(cfg.Repos) > 0 {
 			fmt.Printf("Repos:\n")
 			for _, r := range cfg.Repos {
-				fmt.Printf("  %s\n", r.Path)
+				cli := r.AICli
+				if cli == "" {
+					cli = cfg.AICli
+				}
+				fmt.Printf("  %s (cli: %s)\n", r.Path, cli)
 				for _, c := range r.PostCommands {
 					fmt.Printf("    post: %s\n", c)
 				}
