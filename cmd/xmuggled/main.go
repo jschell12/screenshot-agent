@@ -441,7 +441,7 @@ func runWorker(cfg Config, m *taskMeta, taskID, taskDir string) {
 
 	// Merge via agent-merge (serialized per-project lock)
 	logf("  [%s] Merging via agent-merge", taskID)
-	mergeCmd := exec.Command("python3", amScript, branch, "--delete-branch", "-p", projectName)
+	mergeCmd := exec.Command("python3", amScript, "merge", branch, "--delete-branch", "-p", projectName)
 	mergeCmd.Dir = cloneDir
 	mergeCmd.Env = gitEnv()
 	mergeOut, mergeErr := mergeCmd.CombinedOutput()
