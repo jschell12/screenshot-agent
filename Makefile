@@ -33,13 +33,4 @@ daemon-status:
 	$(INSTALL_DIR)/xmuggled status
 
 log:
-	bash scripts/tail-all.sh
-
-daemon-log:
 	tail -f $(HOME)/.xmuggle/daemon.log
-
-claude-log:
-	@latest=$$(ls -t $(HOME)/.xmuggle/claude-*.log 2>/dev/null | head -1); \
-	if [ -z "$$latest" ]; then echo "No claude logs found"; exit 1; fi; \
-	echo "Tailing $$latest"; \
-	tail -f "$$latest" | python3 scripts/claude-log-filter.py

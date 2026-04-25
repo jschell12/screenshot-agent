@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bufio"
 	"encoding/json"
 	"fmt"
 	"log"
@@ -402,21 +403,71 @@ func runWorker(cfg Config, m *taskMeta, taskID, taskDir string) {
 	}
 	prompt := strings.Join(promptParts, "\n\n")
 
-	// Spawn Claude
-	claudeLog := filepath.Join(xmuggleDir, "claude-"+taskID+".log")
+	// Spawn Claude — stream output and log filtered lines to daemon log
 	logf("  [%s] Spawning claude on branch %s", taskID, branch)
-	logf("  [%s] Tail live: tail -f %s | python3 scripts/claude-log-filter.py", taskID, claudeLog)
 
 	claudeCmd := exec.Command("claude", "--print", "--verbose", "--output-format", "stream-json", "--dangerously-skip-permissions", prompt)
 	claudeCmd.Dir = cloneDir
 	claudeCmd.Env = gitEnv()
-	claudeLogFile, _ := os.Create(claudeLog)
-	claudeCmd.Stdout = claudeLogFile
-	claudeCmd.Stderr = claudeLogFile
-	claudeErr := claudeCmd.Run()
-	claudeLogFile.Close()
-	outputBytes, _ := os.ReadFile(claudeLog)
-	result := strings.TrimSpace(string(outputBytes))
+
+	stdoutPipe, _ := claudeCmd.StdoutPipe()
+	claudeCmd.Stderr = claudeCmd.Stdout // merge stderr into stdout
+	claudeCmd.Start()
+
+	var resultBuf strings.Builder
+	scanner := bufio.NewScanner(stdoutPipe)
+	scanner.Buffer(make([]byte, 1024*1024), 1024*1024) // 1MB line buffer
+	for scanner.Scan() {
+		line := scanner.Text()
+		resultBuf.WriteString(line)
+		resultBuf.WriteString("\n")
+
+		// Parse and log readable content
+		var msg map[string]any
+		if err := json.Unmarshal([]byte(line), &msg); err != nil {
+			continue
+		}
+		if msg["type"] == "assistant" {
+			if message, ok := msg["message"].(map[string]any); ok {
+				if content, ok := message["content"].([]any); ok {
+					for _, block := range content {
+						b, ok := block.(map[string]any)
+						if !ok {
+							continue
+						}
+						switch b["type"] {
+						case "text":
+							if text, ok := b["text"].(string); ok && text != "" {
+								logf("  [%s] %s", taskID, text)
+							}
+						case "tool_use":
+							name, _ := b["name"].(string)
+							inp, _ := b["input"].(map[string]any)
+							switch name {
+							case "Bash":
+								if cmd, ok := inp["command"].(string); ok {
+									logf("  [%s] > %s", taskID, cmd)
+								}
+							case "Edit":
+								logf("  [%s] [edit] %s", taskID, inp["file_path"])
+							case "Write":
+								logf("  [%s] [write] %s", taskID, inp["file_path"])
+							case "Read":
+								logf("  [%s] [read] %s", taskID, inp["file_path"])
+							case "Agent":
+								logf("  [%s] [agent] %s", taskID, inp["description"])
+							default:
+								logf("  [%s] [%s]", taskID, name)
+							}
+						}
+					}
+				}
+			}
+		}
+	}
+
+	claudeErr := claudeCmd.Wait()
+	result := strings.TrimSpace(resultBuf.String())
 
 	if claudeErr != nil {
 		logf("  [%s] Claude failed: %v", taskID, claudeErr)
