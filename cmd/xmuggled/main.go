@@ -753,9 +753,8 @@ func runPostTaskCommands(cfg Config, project, taskID string) {
 	var newProcs []*os.Process
 	for _, cmdStr := range rc.PostCommands {
 		logf("  [%s] Post-task: running %q in %s", taskID, cmdStr, rc.Path)
-		cmd := exec.Command("bash", "-c", cmdStr)
+		cmd := exec.Command("bash", "-lc", cmdStr)
 		cmd.Dir = rc.Path
-		cmd.Env = os.Environ()
 		// Start in its own process group so we can kill the whole tree later.
 		cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 		if err := cmd.Start(); err != nil {
