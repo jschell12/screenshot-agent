@@ -750,34 +750,40 @@ func runPostTaskCommands(cfg Config, project, taskID string) {
 		logf("  [%s] Post-task: git pull failed: %s", taskID, out)
 	}
 
-	// Run post-commands
-	var newProcs []*os.Process
-	for _, cmdStr := range rc.PostCommands {
-		logf("  [%s] Post-task: running %q in %s", taskID, cmdStr, rc.Path)
-		cmd := exec.Command("bash", "-lc", cmdStr)
+	// Run post-commands as a single script in a fully detached login shell.
+	// This ensures background processes (like make app which launches Vite +
+	// Electron) survive independently of the daemon and get the full user
+	// environment (PATH, secrets, etc).
+	if len(rc.PostCommands) > 0 {
+		script := strings.Join(rc.PostCommands, " && ")
+		logf("  [%s] Post-task: running %q in %s", taskID, script, rc.Path)
+
+		postLog := filepath.Join(xmuggleDir, "post-cmd-"+taskID+".log")
+		cmd := exec.Command("bash", "-lc", script)
 		cmd.Dir = rc.Path
-		// Start in its own process group so we can kill the whole tree later.
-		cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+		cmd.SysProcAttr = &syscall.SysProcAttr{Setsid: true}
+		cmd.Stdin = nil
+		logFile, _ := os.Create(postLog)
+		cmd.Stdout = logFile
+		cmd.Stderr = logFile
+
 		if err := cmd.Start(); err != nil {
-			logf("  [%s] Post-task: %q failed to start: %v", taskID, cmdStr, err)
-			continue
+			logf("  [%s] Post-task: failed to start: %v", taskID, err)
+			logFile.Close()
+		} else {
+			logf("  [%s] Post-task: started (pid %d), log: %s", taskID, cmd.Process.Pid, postLog)
+			// Wait in background to log completion
+			go func() {
+				err := cmd.Wait()
+				logFile.Close()
+				if err != nil {
+					logf("  [%s] Post-task: exited with error: %v", taskID, err)
+				} else {
+					logf("  [%s] Post-task: completed successfully", taskID)
+				}
+			}()
 		}
-		logf("  [%s] Post-task: %q started (pid %d)", taskID, cmdStr, cmd.Process.Pid)
-		newProcs = append(newProcs, cmd.Process)
-
-		// Wait in the background so we log completion / reap zombies.
-		go func(cmdStr string, c *exec.Cmd) {
-			if err := c.Wait(); err != nil {
-				logf("  [%s] Post-task: %q exited: %v", taskID, cmdStr, err)
-			} else {
-				logf("  [%s] Post-task: %q succeeded", taskID, cmdStr)
-			}
-		}(cmdStr, cmd)
 	}
-
-	postCmdProcs.Lock()
-	postCmdProcs.m[rc.Path] = newProcs
-	postCmdProcs.Unlock()
 
 	// Signal the xmuggle Electron app to reload its UI
 	reloadXmuggleUI(taskID)
