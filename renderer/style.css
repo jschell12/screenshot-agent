@@ -762,8 +762,14 @@ header h1 {
 
 .settings-repo-row {
   display: flex;
+  flex-direction: column;
+  gap: 4px;
+  margin-bottom: 10px;
+}
+
+.settings-repo-row .repo-top-row {
+  display: flex;
   gap: 6px;
-  margin-bottom: 6px;
   align-items: center;
 }
 
@@ -775,7 +781,8 @@ header h1 {
 }
 
 .settings-repo-row .repo-cmds {
-  flex: 1;
+  width: 100%;
+  box-sizing: border-box;
   background: #1a1a2e;
   border: 1px solid #0f3460;
   color: #e0e0e0;

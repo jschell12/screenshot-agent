@@ -359,13 +359,15 @@ settingsBtn.addEventListener('click', async () => {
       const row = document.createElement('div');
       row.className = 'settings-repo-row';
       row.innerHTML = `
-        <span class="repo-name">${name}</span>
-        <select class="repo-cli" title="AI CLI override">
-          <option value="">default</option>
-          <option value="claude" ${repoCli === 'claude' ? 'selected' : ''}>Claude</option>
-          <option value="cursor" ${repoCli === 'cursor' ? 'selected' : ''}>Cursor</option>
-        </select>
-        <input type="text" class="repo-cmds" value="${cmds}" placeholder="make build; make install">
+        <div class="repo-top-row">
+          <span class="repo-name">${name}</span>
+          <select class="repo-cli" title="AI CLI override">
+            <option value="">default</option>
+            <option value="claude" ${repoCli === 'claude' ? 'selected' : ''}>Claude</option>
+            <option value="cursor" ${repoCli === 'cursor' ? 'selected' : ''}>Cursor</option>
+          </select>
+        </div>
+        <input type="text" class="repo-cmds" value="${cmds}" placeholder="post task commands: make build; make install">
       `;
       row.querySelector('.repo-cmds').addEventListener('change', (e) => {
         const val = e.target.value.trim();
