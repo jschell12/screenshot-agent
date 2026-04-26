@@ -47,7 +47,8 @@ var postCmdProcs = struct {
 type RepoConfig struct {
 	Path         string   `json:"path"`
 	PostCommands []string `json:"postCommands,omitempty"`
-	AICli        string   `json:"aiCli,omitempty"` // per-repo override: "claude" or "cursor"
+	AICli        string   `json:"aiCli,omitempty"`        // per-repo override: "claude" or "cursor"
+	TmuxSession  string   `json:"tmuxSession,omitempty"`  // tmux session name for restart
 }
 
 type Config struct {
@@ -895,63 +896,86 @@ func killPostCmdProcs(repoPath, taskID string) {
 func runPostTaskCommands(cfg Config, project, taskID string) {
 	rc := findRepoConfig(cfg, project)
 	if rc == nil || rc.Path == "" {
+		debug("  [%s] Post-task: no repo config for %s", taskID, project)
 		return
 	}
 
-	// Check local path exists
+	if len(rc.PostCommands) == 0 {
+		debug("  [%s] Post-task: no commands configured for %s", taskID, filepath.Base(rc.Path))
+		reloadApp(taskID, "xmuggle", 24816)
+		reloadApp(taskID, "ai-enhance", 24817)
+		return
+	}
+
+	// tmux mode: send Ctrl-C + commands to the user's tmux session.
+	// This runs in the same environment where the user originally started the app.
+	if rc.TmuxSession != "" {
+		logf("  [%s] Post-task: restarting via tmux session %q", taskID, rc.TmuxSession)
+
+		// Check if tmux session exists
+		if err := exec.Command("tmux", "has-session", "-t", rc.TmuxSession).Run(); err != nil {
+			warn("  [%s] Post-task: tmux session %q not found, skipping", taskID, rc.TmuxSession)
+			return
+		}
+
+		// Send Ctrl-C to interrupt the running process
+		debug("  [%s] Post-task: sending Ctrl-C to tmux %q", taskID, rc.TmuxSession)
+		exec.Command("tmux", "send-keys", "-t", rc.TmuxSession, "C-c").Run()
+		time.Sleep(1 * time.Second)
+
+		// Send the restart commands as a single line
+		script := strings.Join(rc.PostCommands, " && ")
+		debug("  [%s] Post-task: sending to tmux: %s", taskID, script)
+		exec.Command("tmux", "send-keys", "-t", rc.TmuxSession, script, "Enter").Run()
+
+		logf("  [%s] Post-task: sent restart commands to tmux %q", taskID, rc.TmuxSession)
+		return
+	}
+
+	// Fallback: run in detached bash (no tmux)
+	debug("  [%s] Post-task: no tmux session, using detached bash", taskID)
+
 	if _, err := os.Stat(rc.Path); err != nil {
-		logf("  [%s] Post-task: local path %s not found, skipping", taskID, rc.Path)
+		warn("  [%s] Post-task: local path %s not found", taskID, rc.Path)
 		return
 	}
 
-	// Kill any running processes in the repo directory (manually started apps, etc.)
 	killRepoProcesses(rc.Path, taskID)
-
-	// Kill any still-running post-commands for this repo before restarting.
 	killPostCmdProcs(rc.Path, taskID)
 
-	// Pull latest changes
 	logf("  [%s] Post-task: git pull --rebase in %s", taskID, rc.Path)
 	if out, err := runGit(rc.Path, "pull", "--rebase"); err != nil {
-		logf("  [%s] Post-task: git pull failed: %s", taskID, out)
+		warn("  [%s] Post-task: git pull failed: %s", taskID, out)
 	}
 
-	// Run post-commands as a single script in a fully detached login shell.
-	// This ensures background processes (like make app which launches Vite +
-	// Electron) survive independently of the daemon and get the full user
-	// environment (PATH, secrets, etc).
-	if len(rc.PostCommands) > 0 {
-		script := strings.Join(rc.PostCommands, " && ")
-		logf("  [%s] Post-task: running %q in %s", taskID, script, rc.Path)
+	script := strings.Join(rc.PostCommands, " && ")
+	logf("  [%s] Post-task: running %q in %s", taskID, script, rc.Path)
 
-		postLog := filepath.Join(xmuggleDir, "post-cmd-"+taskID+".log")
-		cmd := exec.Command("bash", "-lc", script)
-		cmd.Dir = rc.Path
-		cmd.SysProcAttr = &syscall.SysProcAttr{Setsid: true}
-		cmd.Stdin = nil
-		logFile, _ := os.Create(postLog)
-		cmd.Stdout = logFile
-		cmd.Stderr = logFile
+	postLog := filepath.Join(xmuggleDir, "post-cmd-"+taskID+".log")
+	cmd := exec.Command("bash", "-lc", script)
+	cmd.Dir = rc.Path
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setsid: true}
+	cmd.Stdin = nil
+	lf, _ := os.Create(postLog)
+	cmd.Stdout = lf
+	cmd.Stderr = lf
 
-		if err := cmd.Start(); err != nil {
-			logf("  [%s] Post-task: failed to start: %v", taskID, err)
-			logFile.Close()
-		} else {
-			logf("  [%s] Post-task: started (pid %d), log: %s", taskID, cmd.Process.Pid, postLog)
-			// Wait in background to log completion
-			go func() {
-				err := cmd.Wait()
-				logFile.Close()
-				if err != nil {
-					logf("  [%s] Post-task: exited with error: %v", taskID, err)
-				} else {
-					logf("  [%s] Post-task: completed successfully", taskID)
-				}
-			}()
-		}
+	if err := cmd.Start(); err != nil {
+		errorf("  [%s] Post-task: failed to start: %v", taskID, err)
+		lf.Close()
+	} else {
+		logf("  [%s] Post-task: started (pid %d), log: %s", taskID, cmd.Process.Pid, postLog)
+		go func() {
+			err := cmd.Wait()
+			lf.Close()
+			if err != nil {
+				warn("  [%s] Post-task: exited with error: %v", taskID, err)
+			} else {
+				logf("  [%s] Post-task: completed successfully", taskID)
+			}
+		}()
 	}
 
-	// Signal running Electron apps to reload their UI
 	reloadApp(taskID, "xmuggle", 24816)
 	reloadApp(taskID, "ai-enhance", 24817)
 }
@@ -1107,7 +1131,11 @@ func main() {
 				if cli == "" {
 					cli = cfg.AICli
 				}
-				fmt.Printf("  %s (cli: %s)\n", r.Path, cli)
+				tmux := r.TmuxSession
+				if tmux == "" {
+					tmux = "-"
+				}
+				fmt.Printf("  %s (cli: %s, tmux: %s)\n", r.Path, cli, tmux)
 				for _, c := range r.PostCommands {
 					fmt.Printf("    post: %s\n", c)
 				}
