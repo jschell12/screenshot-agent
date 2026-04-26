@@ -625,8 +625,8 @@ func runWorker(cfg Config, m *taskMeta, taskID, taskDir string) {
 	result := strings.TrimSpace(resultBuf.String())
 
 	if totalIn > 0 || totalOut > 0 {
-		logf("  [%s] Tokens: %d in / %d out / %d cache-read / %d cache-write",
-			taskID, totalIn, totalOut, totalCacheRead, totalCacheWrite)
+		logf("  [%s] Tokens (%s): %d in / %d out / %d cache-read / %d cache-write",
+			taskID, aiCli, totalIn, totalOut, totalCacheRead, totalCacheWrite)
 	}
 
 	if claudeErr != nil {
