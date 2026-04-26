@@ -512,6 +512,7 @@ func runWorker(cfg Config, m *taskMeta, taskID, taskDir string) {
 	claudeCmd.Start()
 
 	var resultBuf strings.Builder
+	var totalIn, totalOut, totalCacheRead, totalCacheWrite int64
 	scanner := bufio.NewScanner(stdoutPipe)
 	scanner.Buffer(make([]byte, 1024*1024), 1024*1024) // 1MB line buffer
 	for scanner.Scan() {
@@ -522,15 +523,23 @@ func runWorker(cfg Config, m *taskMeta, taskID, taskDir string) {
 		// Parse and log readable content
 		var msg map[string]any
 		if err := json.Unmarshal([]byte(line), &msg); err != nil {
-			// Not JSON — log plain text lines (cursor may output differently)
 			trimmed := strings.TrimSpace(line)
 			if trimmed != "" {
 				logf("  [%s] %s", taskID, trimmed)
 			}
 			continue
 		}
+
+		// Track tokens — Claude puts usage in assistant messages, Cursor in result
 		if msg["type"] == "assistant" {
 			if message, ok := msg["message"].(map[string]any); ok {
+				// Claude token tracking
+				if usage, ok := message["usage"].(map[string]any); ok {
+					totalIn += toInt64(usage["input_tokens"])
+					totalOut += toInt64(usage["output_tokens"])
+					totalCacheRead += toInt64(usage["cache_read_input_tokens"])
+					totalCacheWrite += toInt64(usage["cache_creation_input_tokens"])
+				}
 				if content, ok := message["content"].([]any); ok {
 					for _, block := range content {
 						b, ok := block.(map[string]any)
@@ -566,10 +575,24 @@ func runWorker(cfg Config, m *taskMeta, taskID, taskDir string) {
 				}
 			}
 		}
+		// Cursor puts usage in the final result message
+		if msg["type"] == "result" {
+			if usage, ok := msg["usage"].(map[string]any); ok {
+				totalIn += toInt64(usage["inputTokens"])
+				totalOut += toInt64(usage["outputTokens"])
+				totalCacheRead += toInt64(usage["cacheReadTokens"])
+				totalCacheWrite += toInt64(usage["cacheWriteTokens"])
+			}
+		}
 	}
 
 	claudeErr := claudeCmd.Wait()
 	result := strings.TrimSpace(resultBuf.String())
+
+	if totalIn > 0 || totalOut > 0 {
+		logf("  [%s] Tokens: %d in / %d out / %d cache-read / %d cache-write",
+			taskID, totalIn, totalOut, totalCacheRead, totalCacheWrite)
+	}
 
 	if claudeErr != nil {
 		// Exit code 143 = killed by SIGTERM (128+15), e.g. daemon restart.
@@ -1035,6 +1058,18 @@ func readPid() (int, bool) {
 		return 0, false
 	}
 	return pid, true
+}
+
+func toInt64(v any) int64 {
+	switch n := v.(type) {
+	case float64:
+		return int64(n)
+	case int64:
+		return n
+	case int:
+		return int64(n)
+	}
+	return 0
 }
 
 func orDefault(s, def string) string {
