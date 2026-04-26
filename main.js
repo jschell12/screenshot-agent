@@ -254,6 +254,23 @@ function getProjectSlug(projectPath) {
   }
 }
 
+function resolveTaskAICli(daemonCfg, projectPath, projectSlug) {
+  const repos = Array.isArray(daemonCfg?.repos) ? daemonCfg.repos : [];
+  const normalizedPath = path.resolve(projectPath);
+  const projectName = path.basename(normalizedPath);
+  const slugName = path.basename(projectSlug || '');
+  const repo = repos.find((r) => {
+    if (!r || !r.path) return false;
+    const repoPath = path.resolve(r.path);
+    const repoBase = path.basename(repoPath);
+    return repoPath === normalizedPath || repoBase === projectName || (slugName && repoBase === slugName);
+  });
+
+  // Only stamp an explicit per-repo override onto the task.
+  // If unset, let the processing daemon choose using its own repo/global config.
+  return repo && repo.aiCli ? repo.aiCli : '';
+}
+
 function queuePush(imagePaths, projectPath, message) {
   const queueDir = ensureQueueClone();
   if (!queueDir) throw new Error('No queue repo configured. Set it in the relay dropdown.');
@@ -274,13 +291,13 @@ function queuePush(imagePaths, projectPath, message) {
 
   const project = getProjectSlug(projectPath);
 
-  // Look up AI CLI from daemon config for this project
+  // Look up AI CLI override from daemon config for this project.
+  // Do not force global defaults into task meta; that can override repo-specific
+  // settings on the processing machine.
   let aiCli = '';
   try {
     const daemonCfg = JSON.parse(fs.readFileSync(path.join(XMUGGLE_DIR, 'daemon.json'), 'utf8'));
-    const projectName = path.basename(projectPath);
-    const repo = (daemonCfg.repos || []).find(r => path.basename(r.path) === projectName);
-    aiCli = (repo && repo.aiCli) || daemonCfg.aiCli || '';
+    aiCli = resolveTaskAICli(daemonCfg, projectPath, project);
   } catch {}
 
   fs.writeFileSync(path.join(taskDir, 'meta.json'), JSON.stringify({
